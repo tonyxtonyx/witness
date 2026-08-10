@@ -1,0 +1,17 @@
+version: 1
+kind: object
+metadata:
+  name: customers
+  domain: retail
+  label: Customers
+  description: Registered customers
+  owner: crm-analytics
+  tags: [sales, crm]
+spec:
+  source: {catalog: postgres, schema: public, table: customers}
+  primaryKey: [customer_id]
+  dimensions:
+    - {name: customer_id, label: Customer ID, type: bigint, sql: customer_id, nullable: false}
+    - {name: name, label: Name, type: varchar, sql: name}
+    - {name: country, label: Country, type: varchar, sql: country}
+  relationships: []

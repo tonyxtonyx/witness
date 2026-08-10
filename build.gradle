@@ -1,0 +1,41 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.4'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.acme'
+version = '0.1.0'
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+
+repositories { mavenCentral() }
+
+sourceSets {
+    main.java.srcDirs = ['backend/src/main/java']
+    main.resources.srcDirs = ['backend/src/main/resources']
+    test.java.srcDirs = ['backend/src/test/java']
+    test.resources.srcDirs = ['backend/src/test/resources']
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+    implementation 'com.github.jsqlparser:jsqlparser:5.0'
+    implementation 'io.trino:trino-jdbc:468'
+    implementation 'com.zaxxer:HikariCP'
+    implementation 'io.netty:netty-all:4.1.114.Final'
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.postgresql:postgresql:42.7.4'
+}
+
+tasks.named('test') { useJUnitPlatform() }
+
+tasks.register('resolveDependencies') {
+    doLast {
+        configurations.findAll { it.canBeResolved }.each { it.resolve() }
+    }
+}

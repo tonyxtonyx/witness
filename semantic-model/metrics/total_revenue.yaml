@@ -1,0 +1,17 @@
+version: 1
+kind: metric
+metadata:
+  name: total_revenue
+  domain: retail
+  label: Total revenue
+  description: Revenue from completed orders
+  owner: finance-analytics
+  tags: [revenue, finance]
+spec:
+  baseObject: orders
+  aggregation: sum
+  expression: amount
+  resultType: "decimal(18,2)"
+  format: currency
+  filters:
+    - {field: status, operator: in, values: [paid, completed]}

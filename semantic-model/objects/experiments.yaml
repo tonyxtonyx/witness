@@ -1,0 +1,19 @@
+version: 1
+kind: object
+metadata:
+  name: experiments
+  domain: ai_rnd
+  label: AI experiments
+  description: Model research and evaluation runs
+  owner: ai-platform
+  tags: [ai, research]
+spec:
+  source: {catalog: postgres, schema: public, table: ai_experiments}
+  primaryKey: [experiment_id]
+  dimensions:
+    - {name: experiment_id, label: Experiment ID, type: bigint, sql: experiment_id, nullable: false}
+    - {name: model_name, label: Model name, type: varchar, sql: model_name}
+    - {name: created_at, label: Created at, type: timestamp, sql: created_at}
+    - {name: quality_score, label: Quality score, type: "decimal(5,4)", sql: quality_score}
+    - {name: status, label: Status, type: varchar, sql: status}
+  relationships: []

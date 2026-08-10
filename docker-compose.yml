@@ -1,0 +1,31 @@
+services:
+  demo-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: demo, POSTGRES_USER: demo, POSTGRES_PASSWORD: demo}
+    volumes: ["./demo-data/init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    ports: ["5434:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U demo"], interval: 3s, timeout: 3s, retries: 20}
+  trino:
+    image: trinodb/trino:468
+    volumes: ["./trino/catalog:/etc/trino/catalog:ro"]
+    ports: ["8081:8080"]
+    depends_on: {demo-db: {condition: service_healthy}}
+    healthcheck: {test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/info >/dev/null"], interval: 5s, timeout: 3s, retries: 30}
+  backend:
+    build: .
+    volumes: ["./semantic-model:/app/semantic-model"]
+    environment:
+      MODEL_PATH: /app/semantic-model
+      TRINO_JDBC_URL: jdbc:trino://trino:8080/postgres/public
+      TRINO_USERNAME: semantic
+      REST_API_KEY: dev-secret
+      PGWIRE_USERNAME: semantic
+      PGWIRE_PASSWORD: semantic
+      GITLAB_ENABLED: "false"
+    ports: ["8080:8080", "${PGWIRE_HOST_PORT:-55433}:5433"]
+    depends_on: {trino: {condition: service_healthy}}
+    healthcheck: {test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness >/dev/null"], interval: 5s, timeout: 3s, retries: 30}
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: {backend: {condition: service_healthy}}

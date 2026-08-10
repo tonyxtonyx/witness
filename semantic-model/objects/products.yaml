@@ -1,0 +1,17 @@
+version: 1
+kind: object
+metadata:
+  name: products
+  domain: retail
+  label: Products
+  description: Product catalog
+  owner: commerce
+  tags: [sales, catalog]
+spec:
+  source: {catalog: postgres, schema: public, table: products}
+  primaryKey: [product_id]
+  dimensions:
+    - {name: product_id, label: Product ID, type: bigint, sql: product_id, nullable: false}
+    - {name: name, label: Product name, type: varchar, sql: name}
+    - {name: category, label: Category, type: varchar, sql: category}
+  relationships: []

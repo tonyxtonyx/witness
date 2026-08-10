@@ -1,0 +1,13 @@
+version: 1
+kind: project
+metadata:
+  name: witness_demo
+  label: Witness demo
+  description: Orders analytics demo
+  owner: analytics-platform
+  tags: [demo]
+spec:
+  semanticSchema: semantic
+  trino:
+    defaultCatalog: postgres
+    defaultSchema: public

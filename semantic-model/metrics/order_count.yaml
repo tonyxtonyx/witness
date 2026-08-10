@@ -1,0 +1,4 @@
+version: 1
+kind: metric
+metadata: {name: order_count, domain: retail, label: Order count, description: Number of orders, owner: analytics-platform, tags: [sales]}
+spec: {baseObject: orders, aggregation: count, expression: order_id, resultType: bigint, format: number, filters: []}

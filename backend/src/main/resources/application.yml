@@ -1,0 +1,36 @@
+spring:
+  application.name: witness
+  jackson.default-property-inclusion: non_null
+server:
+  port: ${HTTP_PORT:8080}
+management:
+  endpoints.web.exposure.include: health,info,prometheus
+  endpoint.health.probes.enabled: true
+semantic:
+  model-path: ${MODEL_PATH:semantic-model}
+  api-key: ${REST_API_KEY:dev-secret}
+  pgwire:
+    enabled: ${PGWIRE_ENABLED:true}
+    port: ${PGWIRE_PORT:5433}
+    username: ${PGWIRE_USERNAME:semantic}
+    password: ${PGWIRE_PASSWORD:semantic}
+    max-frame-bytes: ${PGWIRE_MAX_FRAME_BYTES:1048576}
+    max-prepared-statements: ${PGWIRE_MAX_PREPARED_STATEMENTS:256}
+  trino:
+    url: ${TRINO_JDBC_URL:jdbc:trino://localhost:8081/memory/default}
+    username: ${TRINO_USERNAME:semantic}
+    password: ${TRINO_PASSWORD:}
+    timeout-seconds: ${QUERY_TIMEOUT_SECONDS:30}
+    max-rows: ${QUERY_MAX_ROWS:10000}
+    pool-size: ${TRINO_POOL_SIZE:10}
+    connection-timeout-ms: ${TRINO_CONNECTION_TIMEOUT_MS:10000}
+  gitlab:
+    enabled: ${GITLAB_ENABLED:false}
+    base-url: ${GITLAB_BASE_URL:}
+    project-id: ${GITLAB_PROJECT_ID:}
+    token: ${GITLAB_TOKEN:}
+    default-branch: ${GITLAB_DEFAULT_BRANCH:main}
+    model-path: ${GITLAB_MODEL_PATH:semantic-model}
+    poll-ms: ${MODEL_POLL_MS:60000}
+    connect-timeout-seconds: ${GITLAB_CONNECT_TIMEOUT_SECONDS:5}
+    read-timeout-seconds: ${GITLAB_READ_TIMEOUT_SECONDS:20}

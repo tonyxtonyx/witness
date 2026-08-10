@@ -1,0 +1,133 @@
+package com.acme.semantic.api;
+
+import com.acme.semantic.catalog.SemanticCatalog;
+import com.acme.semantic.gitlab.ModelRepository;
+import com.acme.semantic.gitlab.MutableModelRepository;
+import com.acme.semantic.model.*;
+import com.acme.semantic.validation.ModelValidator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import java.util.*;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+public class MetricCrudService {
+  private static final String IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*";
+  private final ModelRepository repository;
+  private final SemanticCatalog catalog;
+  private final ModelParser parser;
+  private final ModelValidator validator;
+  private final ObjectMapper yaml =
+      new ObjectMapper(new YAMLFactory()).setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+  public MetricCrudService(
+      ModelRepository repository,
+      SemanticCatalog catalog,
+      ModelParser parser,
+      ModelValidator validator) {
+    this.repository = repository;
+    this.catalog = catalog;
+    this.parser = parser;
+    this.validator = validator;
+  }
+
+  public synchronized SemanticModel.Metric create(MetricInput input) {
+    SemanticModel.Metric metric = normalize(input);
+    if (catalog.model().metrics().containsKey(metric.metadata().name()))
+      throw new ResponseStatusException(
+          HttpStatus.CONFLICT, "Metric already exists: " + metric.metadata().name());
+    String path = path(metric);
+    validateAndApply(Map.of(path, serialize(metric)), Set.of());
+    return catalog.model().metrics().get(metric.metadata().name());
+  }
+
+  public synchronized SemanticModel.Metric update(String name, MetricInput input) {
+    SemanticModel.Metric existing = require(name);
+    SemanticModel.Metric metric = normalize(input);
+    if (!name.equals(metric.metadata().name()))
+      throw new IllegalArgumentException("Metric name in the path and body must match");
+    String path = path(metric);
+    Set<String> deletions = path.equals(existing.file()) ? Set.of() : Set.of(existing.file());
+    validateAndApply(Map.of(path, serialize(metric)), deletions);
+    return catalog.model().metrics().get(name);
+  }
+
+  public synchronized void delete(String name) {
+    SemanticModel.Metric existing = require(name);
+    validateAndApply(Map.of(), Set.of(existing.file()));
+  }
+
+  private SemanticModel.Metric require(String name) {
+    SemanticModel.Metric metric = catalog.model().metrics().get(name);
+    if (metric == null)
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown metric: " + name);
+    return metric;
+  }
+
+  private SemanticModel.Metric normalize(MetricInput input) {
+    if (input == null || input.metadata() == null || input.spec() == null)
+      throw new IllegalArgumentException("metadata and spec are required");
+    String name = input.metadata().name();
+    if (name == null || !name.matches(IDENTIFIER))
+      throw new IllegalArgumentException("Metric name must be a safe SQL identifier");
+    var base = catalog.model().objects().get(input.spec().baseObject());
+    String domain = input.metadata().domain();
+    if ((domain == null || domain.isBlank()) && base != null) domain = catalog.model().domain(base);
+    var metadata =
+        new SemanticModel.Metadata(
+            name,
+            domain,
+            input.metadata().label(),
+            input.metadata().description(),
+            input.metadata().owner(),
+            input.metadata().tags());
+    return new SemanticModel.Metric(1, "metric", metadata, input.spec(), null);
+  }
+
+  private String path(SemanticModel.Metric metric) {
+    String domain = metric.metadata().domain();
+    if (domain == null || !domain.matches(IDENTIFIER))
+      throw new IllegalArgumentException(
+          "Metric domain must be a safe PostgreSQL schema identifier");
+    return "domains/" + domain + "/metrics/" + metric.metadata().name() + ".yaml";
+  }
+
+  private String serialize(SemanticModel.Metric metric) {
+    try {
+      return yaml.writeValueAsString(
+          new MetricDocument(1, "metric", metric.metadata(), metric.spec()));
+    } catch (Exception e) {
+      throw new IllegalStateException("Cannot serialize metric", e);
+    }
+  }
+
+  private void validateAndApply(Map<String, String> upserts, Set<String> deletions) {
+    if (!(repository instanceof MutableModelRepository mutable))
+      throw new ResponseStatusException(
+          HttpStatus.METHOD_NOT_ALLOWED,
+          "Direct metric CRUD is disabled for GitLab mode; submit a model change instead");
+    ModelRevision current = repository.loadDefaultRevision();
+    Map<String, String> candidate = new TreeMap<>(current.files());
+    deletions.forEach(candidate::remove);
+    candidate.putAll(upserts);
+    SemanticModel parsed = parser.parse(new ModelRevision("candidate", candidate));
+    var validation = validator.validate(parsed);
+    if (!validation.valid()) {
+      var first = validation.errors().getFirst();
+      throw new IllegalArgumentException(first.path() + ": " + first.message());
+    }
+    mutable.apply(upserts, deletions);
+    var status = catalog.reload();
+    if (!status.healthy())
+      throw new IllegalStateException(
+          "Metric was persisted but the active model could not reload: " + status.message());
+  }
+
+  public record MetricInput(SemanticModel.Metadata metadata, SemanticModel.MetricSpec spec) {}
+
+  private record MetricDocument(
+      int version, String kind, SemanticModel.Metadata metadata, SemanticModel.MetricSpec spec) {}
+}

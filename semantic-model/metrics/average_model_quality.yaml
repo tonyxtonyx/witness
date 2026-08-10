@@ -1,0 +1,17 @@
+version: 1
+kind: metric
+metadata:
+  name: average_model_quality
+  domain: ai_rnd
+  label: Average model quality
+  description: Mean evaluation score across completed experiments
+  owner: ai-platform
+  tags: [ai, quality]
+spec:
+  baseObject: experiments
+  aggregation: avg
+  expression: quality_score
+  resultType: "decimal(5,4)"
+  format: decimal
+  filters:
+    - {field: status, operator: eq, values: [completed]}

@@ -1,0 +1,4 @@
+version: 1
+kind: metric
+metadata: {name: unique_customers, domain: retail, label: Unique customers, description: Customers with orders, owner: analytics-platform, tags: [sales, crm]}
+spec: {baseObject: orders, aggregation: count_distinct, expression: customer_id, resultType: bigint, format: number, filters: []}

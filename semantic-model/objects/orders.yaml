@@ -1,0 +1,32 @@
+version: 1
+kind: object
+metadata:
+  name: orders
+  domain: retail
+  label: Orders
+  description: Customer orders
+  owner: analytics-platform
+  tags: [sales, finance]
+spec:
+  source: {catalog: postgres, schema: public, table: orders}
+  primaryKey: [order_id]
+  dimensions:
+    - {name: order_id, label: Order ID, type: bigint, sql: order_id, nullable: false}
+    - {name: customer_id, label: Customer ID, type: bigint, sql: customer_id, nullable: false}
+    - {name: product_id, label: Product ID, type: bigint, sql: product_id, nullable: false}
+    - {name: created_at, label: Created at, type: timestamp, sql: created_at}
+    - {name: amount, label: Order amount, type: "decimal(18,2)", sql: amount}
+    - {name: status, label: Status, type: varchar, sql: status}
+  relationships:
+    - name: order_customer
+      targetObject: customers
+      sourceFields: [customer_id]
+      targetFields: [customer_id]
+      cardinality: many_to_one
+      defaultJoinType: left
+    - name: order_product
+      targetObject: products
+      sourceFields: [product_id]
+      targetFields: [product_id]
+      cardinality: many_to_one
+      defaultJoinType: left

@@ -1,0 +1,4 @@
+version: 1
+kind: metric
+metadata: {name: average_order_value, domain: retail, label: Average order value, description: Mean order amount, owner: finance-analytics, tags: [sales, finance]}
+spec: {baseObject: orders, aggregation: avg, expression: amount, resultType: "decimal(18,2)", format: currency, filters: []}
