@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   private static final int MAX_SQL = 64 * 1024;
   private static final ModelExpressionPolicy MODEL_EXPRESSIONS = new ModelExpressionPolicy();
+  private static final SourceSelectPolicy SOURCE_SELECTS = new SourceSelectPolicy();
   private static final Set<String> AGGREGATE_FUNCTIONS =
       Set.of("sum", "count", "min", "max", "avg");
   private static final Set<String> FUNCTIONS =
@@ -355,6 +356,9 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   private String physical(Table table, Context c) {
     String a = alias(table);
     var o = c.objects.get(a);
+    if (o.spec().source().derived()) {
+      return "(" + SOURCE_SELECTS.render(o.spec().source().select()) + ") " + q(a);
+    }
     return q(o.spec().source().catalog())
         + "."
         + q(o.spec().source().schema())

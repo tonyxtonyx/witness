@@ -114,4 +114,56 @@ class SqlCompilerGoldenTest {
                     TestModels.demo()))
         .doesNotThrowAnyException();
   }
+
+  @Test
+  void compilesDimensionsAndMetricsAgainstDerivedJoinedObject() {
+    SemanticModel model = TestModels.demo();
+    var objects = new LinkedHashMap<>(model.objects());
+    var orders = objects.get("orders");
+    var derivedSource =
+        new SemanticModel.Source(
+            null,
+            null,
+            null,
+            """
+            SELECT
+              o.order_id,
+              o.customer_id,
+              o.product_id,
+              o.created_at,
+              o.amount,
+              o.status,
+              c.country
+            FROM postgres.public.orders o
+            LEFT JOIN postgres.public.customers c ON c.customer_id = o.customer_id
+            """);
+    var derivedSpec =
+        new SemanticModel.ObjectSpec(
+            derivedSource,
+            orders.spec().primaryKey(),
+            orders.spec().dimensions(),
+            orders.spec().relationships());
+    objects.put(
+        "orders",
+        new SemanticModel.SemanticObject(
+            orders.version(),
+            orders.kind(),
+            orders.metadata(),
+            derivedSpec,
+            orders.file()));
+    SemanticModel derivedModel =
+        new SemanticModel(
+            model.project(), objects, model.metrics(), model.revision(), model.loadedAt());
+
+    var query =
+        compiler.compile(
+            "SELECT customer_id, total_revenue FROM retail.orders GROUP BY customer_id",
+            derivedModel);
+
+    assertThat(query.trinoSql())
+        .contains("FROM (SELECT")
+        .contains("LEFT JOIN postgres.public.customers c")
+        .contains(") \"orders\"")
+        .contains("SUM(\"orders\".\"amount\")");
+  }
 }

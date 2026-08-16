@@ -33,19 +33,20 @@ public class SemanticCatalog {
 
   @Scheduled(fixedDelayString = "${semantic.gitlab.poll-ms:60000}")
   public void poll() {
-    if (active.get() != null)
-      try {
-        if (!repository.currentRevision().equals(active.get().revision())) reload();
-      } catch (Exception e) {
-        status =
-            new Status(
-                false,
-                activeRevision(),
-                Instant.now(),
-                null,
-                "Model polling failed; previous revision remains active");
-        log.warn("Semantic model polling failed; activeRevision={}", activeRevision(), e);
+    try {
+      if (active.get() == null || !repository.currentRevision().equals(active.get().revision())) {
+        reload();
       }
+    } catch (Exception e) {
+      status =
+          new Status(
+              false,
+              activeRevision(),
+              Instant.now(),
+              null,
+              "Model polling failed; previous revision remains active");
+      log.warn("Semantic model polling failed; activeRevision={}", activeRevision(), e);
+    }
   }
 
   public synchronized Status reload() {

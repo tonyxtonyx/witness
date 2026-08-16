@@ -18,18 +18,21 @@ public class ApiController {
   private final ModelParser parser;
   private final ModelValidator validator;
   private final MetricCrudService metricCrud;
+  private final ObjectCrudService objectCrud;
 
   public ApiController(
       SemanticCatalog catalog,
       ChangeService changes,
       ModelParser parser,
       ModelValidator validator,
-      MetricCrudService metricCrud) {
+      MetricCrudService metricCrud,
+      ObjectCrudService objectCrud) {
     this.catalog = catalog;
     this.changes = changes;
     this.parser = parser;
     this.validator = validator;
     this.metricCrud = metricCrud;
+    this.objectCrud = objectCrud;
   }
 
   @GetMapping("/objects")
@@ -50,6 +53,25 @@ public class ApiController {
     if (object == null)
       throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown object: " + name);
     return object;
+  }
+
+  @PostMapping("/objects")
+  @ResponseStatus(HttpStatus.CREATED)
+  public SemanticModel.SemanticObject createObject(
+      @RequestBody ObjectCrudService.ObjectInput input) {
+    return objectCrud.create(input);
+  }
+
+  @PutMapping("/objects/{name}")
+  public SemanticModel.SemanticObject updateObject(
+      @PathVariable String name, @RequestBody ObjectCrudService.ObjectInput input) {
+    return objectCrud.update(name, input);
+  }
+
+  @DeleteMapping("/objects/{name}")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void deleteObject(@PathVariable String name) {
+    objectCrud.delete(name);
   }
 
   @GetMapping("/metrics")

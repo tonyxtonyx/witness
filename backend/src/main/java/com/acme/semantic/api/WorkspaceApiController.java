@@ -78,7 +78,9 @@ public class WorkspaceApiController {
     return new ObjectSource(
         object.file(),
         yaml,
-        source.catalog() + "." + source.schema() + "." + source.table(),
+        source.derived()
+            ? "Derived SELECT (governed SQL)"
+            : source.catalog() + "." + source.schema() + "." + source.table(),
         object.spec().dimensions().stream().map(d -> new LineageField(d.name(), d.sql())).toList());
   }
 

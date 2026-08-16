@@ -1,7 +1,8 @@
 export type Metadata={name:string;domain:string;label?:string;description?:string;owner?:string;tags:string[]};
 export type Dimension={name:string;label?:string;description?:string;type:string;sql:string;nullable?:boolean};
 export type Relationship={name:string;targetObject:string;sourceFields:string[];targetFields:string[];cardinality:string;defaultJoinType:string};
-export type SemanticObject={version:number;kind:string;metadata:Metadata;spec:{source:{catalog:string;schema:string;table:string};primaryKey:string[];dimensions:Dimension[];relationships:Relationship[]};file:string};
+export type ObjectSourceDefinition={catalog?:string;schema?:string;table?:string;select?:string};
+export type SemanticObject={version:number;kind:string;metadata:Metadata;spec:{source:ObjectSourceDefinition;primaryKey:string[];dimensions:Dimension[];relationships:Relationship[]};file:string};
 export type MetricFilter={field:string;operator:string;values:unknown[]};
 export type Metric={version:number;kind:string;metadata:Metadata;spec:{baseObject:string;aggregation:string;expression:string;resultType:string;format:string;filters:MetricFilter[]};file:string};
 export type Domain={key:string;label:string;objectCount:number;metricCount:number};

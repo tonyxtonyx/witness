@@ -4,6 +4,7 @@ import static com.acme.semantic.validation.ValidationError.Severity.ERROR;
 
 import com.acme.semantic.compiler.ModelExpressionPolicy;
 import com.acme.semantic.compiler.SqlCompilationException;
+import com.acme.semantic.compiler.SourceSelectPolicy;
 import com.acme.semantic.model.SemanticModel;
 import java.util.*;
 import java.util.regex.Pattern;
@@ -21,6 +22,7 @@ public class DefaultModelValidator implements ModelValidator {
   private static final Set<String> FORMATS =
       Set.of("number", "decimal", "currency", "percent", "duration", "text", "date", "datetime");
   private static final ModelExpressionPolicy MODEL_EXPRESSIONS = new ModelExpressionPolicy();
+  private static final SourceSelectPolicy SOURCE_SELECTS = new SourceSelectPolicy();
 
   @Override
   public ValidationResult validate(SemanticModel model) {
@@ -59,9 +61,10 @@ public class DefaultModelValidator implements ModelValidator {
             "INVALID_IDENTIFIER",
             "Domain must be a safe PostgreSQL schema identifier");
       if (object.spec() == null || object.spec().source() == null) {
-        error(out, file, "spec.source", "REQUIRED", "Physical source is required");
+        error(out, file, "spec.source", "REQUIRED", "Object source is required");
         continue;
       }
+      validateSource(out, file, object.spec().source());
       Set<String> dimensions = new HashSet<>();
       for (int i = 0; i < object.spec().dimensions().size(); i++) {
         var d = object.spec().dimensions().get(i);
@@ -239,6 +242,49 @@ public class DefaultModelValidator implements ModelValidator {
       MODEL_EXPRESSIONS.render(expression, "base", kind);
     } catch (SqlCompilationException e) {
       error(out, file, path, "UNSAFE_SQL_EXPRESSION", e.getMessage());
+    }
+  }
+
+  private void validateSource(
+      List<ValidationError> out, String file, SemanticModel.Source source) {
+    boolean derived = !blank(source.select());
+    boolean hasTableFields =
+        !blank(source.catalog()) || !blank(source.schema()) || !blank(source.table());
+    if (derived && hasTableFields) {
+      error(
+          out,
+          file,
+          "spec.source",
+          "AMBIGUOUS_SOURCE",
+          "Use either catalog/schema/table or select, not both");
+      return;
+    }
+    if (derived) {
+      try {
+        SOURCE_SELECTS.render(source.select());
+      } catch (SqlCompilationException e) {
+        error(out, file, "spec.source.select", "UNSAFE_SOURCE_SELECT", e.getMessage());
+      }
+      return;
+    }
+    if (blank(source.catalog()) || blank(source.schema()) || blank(source.table())) {
+      error(
+          out,
+          file,
+          "spec.source",
+          "REQUIRED",
+          "Table source requires catalog, schema, and table");
+      return;
+    }
+    validatePhysicalIdentifier(out, file, "spec.source.catalog", source.catalog());
+    validatePhysicalIdentifier(out, file, "spec.source.schema", source.schema());
+    validatePhysicalIdentifier(out, file, "spec.source.table", source.table());
+  }
+
+  private void validatePhysicalIdentifier(
+      List<ValidationError> out, String file, String path, String value) {
+    if (!SAFE_IDENTIFIER.matcher(value).matches()) {
+      error(out, file, path, "INVALID_IDENTIFIER", "Invalid physical source identifier");
     }
   }
 

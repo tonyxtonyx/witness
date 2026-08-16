@@ -4,7 +4,7 @@
 
 ### A fair witness for your metrics
 
-Define business meaning in YAML, query it through SQL, manage it in a web UI, and govern production changes through GitLab Merge Requests.
+Design business meaning in visual builders or YAML, query it through SQL, and govern production changes through GitLab Merge Requests.
 
 ![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3-6DB33F?logo=springboot&logoColor=white)
@@ -46,7 +46,9 @@ ORDER BY total_revenue DESC;
 - **AST-based SQL compiler** — registered semantic fields are compiled into physical Trino SQL without string substitution.
 - **Governed metrics** — reusable aggregations, filters, result types, formats, ownership, and descriptions.
 - **Safe-by-default joins** — declared relationships are validated and known fan-out risks are rejected instead of returning incorrect totals.
-- **Local metric CRUD** — create, update, and delete validated metric YAML during development.
+- **Derived objects** — an object can resolve to one physical table or to a governed read-only SELECT joining several fully qualified Trino tables.
+- **Visual YAML builders** — create and edit objects or metrics with regular forms while Witness generates the specification live.
+- **Complete local CRUD** — create, update, move between domains, and safely delete validated objects and metrics during development.
 - **GitLab workflow** — production changes become atomic commits and Merge Requests; the application never merges its own changes.
 - **Web workspace** — catalog, metric registry, SQL editor, global search, lineage, ER diagram, connection guide, and governed change wizard.
 - **Immutable active model** — a candidate revision becomes active only after complete parsing and validation.
@@ -138,6 +140,53 @@ Docker starts the complete data path:
 
 The demo database is initialized from [`demo-data/init.sql`](demo-data/init.sql) with customers, products, orders, and AI experiments.
 
+### Run the complete GitLab-governed demo
+
+The regular quick start uses local filesystem governance. To demonstrate the complete
+branch → commit → Merge Request → merge → activation flow, run:
+
+```bash
+./scripts/gitlab-demo.sh
+```
+
+This adds a pinned GitLab CE container, creates an idempotent local demo token and the
+private `root/witness` project, seeds the current semantic model into `main`, and starts
+Witness with GitLab as its source of truth.
+
+> GitLab CE is a large image and needs substantially more resources than the rest of the
+> demo. Allow roughly 6 GB of Docker memory and several minutes for the first startup.
+
+| Service | Address | Local demo credentials |
+|---|---|---|
+| Witness | [localhost:3000](http://localhost:3000) | — |
+| GitLab project | [localhost:8929/root/witness](http://localhost:8929/root/witness) | `root` / `WitnessDemo123!` |
+
+Demo flow:
+
+1. Open Witness and select **Create object**, or open an existing object and select
+   **Edit object**. From the metric registry, select **Create metric** and choose the
+   existing base object that owns the metric.
+2. Fill in the visual form. The generated YAML updates live beside it; no YAML knowledge
+   is required.
+3. Select **Review generated YAML**, validate the complete candidate model, review the
+   diff, and select **Create Merge Request**.
+4. To update or delete an object, return to **Edit object**. Witness refuses deletion while
+   a metric or incoming relationship still depends on the object.
+5. Open the generated MR in GitLab and merge it into `main`.
+6. Return to Witness. The backend polls `main` every five seconds and the catalog refreshes
+   automatically; the merged create, update, or deletion appears within roughly ten seconds.
+
+The credentials and API token in this overlay are intentionally fixed and are only suitable
+for an isolated localhost demo. GitLab state is persisted in named Docker volumes. A normal
+shutdown preserves it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gitlab.yml down
+```
+
+To deliberately erase the local GitLab project and start over, add `--volumes` to that
+command. This permanently deletes the demo GitLab data.
+
 ### Run your first semantic query
 
 Open the [query workspace](http://localhost:3000/query) or call the REST API:
@@ -177,6 +226,11 @@ semantic-model/
 ```
 
 The parser discovers YAML recursively by its `kind`, so domain-oriented paths such as `domains/retail/metrics/gross_margin.yaml` are supported as well.
+
+You do not have to author these documents by hand. The object and metric builders expose
+metadata, physical source, dimensions, primary keys, relationships, aggregations, filters,
+and ownership as HTML controls. They continuously generate the exact YAML shown below.
+Expert users can still inspect or adjust that YAML during the change review.
 
 ### Object example
 
@@ -222,6 +276,57 @@ spec:
       cardinality: many_to_one
       defaultJoinType: left
 ```
+
+### Derived object example
+
+For a business object assembled from several physical tables, replace
+`catalog/schema/table` with one governed `select`:
+
+```yaml
+version: 1
+kind: object
+
+metadata:
+  name: order_customer_facts
+  domain: retail
+  label: Order customer facts
+  description: Orders enriched with customer attributes
+  owner: sales-analytics
+  tags: [sales, customer]
+
+spec:
+  source:
+    select: |
+      SELECT
+        o.order_id,
+        o.customer_id,
+        o.amount,
+        o.status,
+        c.country
+      FROM postgres.public.orders o
+      LEFT JOIN postgres.public.customers c
+        ON c.customer_id = o.customer_id
+
+  primaryKey: [order_id]
+
+  dimensions:
+    - name: order_id
+      type: bigint
+      sql: order_id
+      nullable: false
+    - name: country
+      type: varchar
+      sql: country
+
+  relationships: []
+```
+
+Witness validates this source as one read-only SELECT and compiles semantic queries as
+`FROM (<derived SELECT>) object_alias`. Physical tables must use
+`catalog.schema.table`; comments, parameters, DML, DDL, statement separators, CTEs,
+and set operations fail closed. Dimensions and metrics reference the columns projected
+by the SELECT, so the object remains available through REST, JDBC, DBeaver, and the
+regular semantic SQL compiler.
 
 ### Metric example
 
@@ -324,7 +429,10 @@ The React application includes:
 
 - Domain-grouped semantic catalog
 - Object detail with dimensions, metrics, relationships, lineage, and YAML
-- Metric registry and editor
+- Visual object builder with live YAML, dynamic dimensions and relationships, primary-key
+  selection, table/derived-SELECT source modes, and dependency-aware deletion
+- Metric registry with a **Create metric** action, mandatory base-object selection, and a
+  visual metric builder with live YAML and expression validation
 - Global semantic search
 - SQL workspace with results and compiled Trino SQL
 - ER diagram powered by React Flow
@@ -337,7 +445,9 @@ The React application includes:
 | Capability | Local development | GitLab governed mode |
 |---|---|---|
 | Model source | Local YAML directory | GitLab default branch |
-| Metric create/update/delete | Atomic local YAML write | Proposed through branch + MR |
+| Object create/update/delete | Atomic validated YAML write | Proposed through branch + MR |
+| Metric create/update/delete | Atomic validated YAML write | Proposed through branch + MR |
+| Domain move | Move YAML and reload atomically | Delete old path + create new path in one MR |
 | Activation | Validate and reload immediately | After merge, polling, and validation |
 | Change preview | Validation and diff | Validation, diff, base revision, affected entities |
 | Conflict protection | Local synchronization | Default-branch SHA check |
@@ -370,6 +480,7 @@ Key endpoint groups:
 | Area | Endpoints |
 |---|---|
 | Catalog | `GET /objects`, `/objects/{name}`, `/metrics`, `/metrics/{name}` |
+| Object CRUD | `POST /objects`, `PUT /objects/{name}`, `DELETE /objects/{name}` |
 | Metric CRUD | `POST /metrics`, `PUT /metrics/{name}`, `DELETE /metrics/{name}` |
 | Model | `GET /model`, `/model/status`, `POST /model/validate`, `/model/reload` |
 | Query | `POST /query`, `POST /validate` |
@@ -427,7 +538,7 @@ npm run dev
 ```text
 .
 ├── backend/src/main/java/com/acme/semantic/
-│   ├── api/          REST controllers, security, metric CRUD
+│   ├── api/          REST controllers, security, object and metric CRUD
 │   ├── catalog/      active immutable semantic model
 │   ├── compiler/     AST validation and semantic SQL compilation
 │   ├── config/       application and connection-pool configuration
@@ -456,6 +567,7 @@ A revision is activated only when the complete model passes validation, includin
 - Metric base objects, filters, formats, and result types
 - Metric/dimension name collisions
 - Fail-closed model-expression AST policy
+- Fail-closed derived-source SELECT policy with fully qualified physical tables
 - Metric fields resolved through registered dimensions
 
 If polling, parsing, or validation fails, the previous valid revision remains active and the catalog reports an unhealthy status.

@@ -6,6 +6,7 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.*;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -18,6 +19,7 @@ public class GitLabModelRepository implements ModelRepository {
   private final SemanticProperties.Gitlab config;
   private final RestClient client;
 
+  @Autowired
   public GitLabModelRepository(SemanticProperties properties) {
     this(properties, requestBuilder(properties.gitlab()));
   }

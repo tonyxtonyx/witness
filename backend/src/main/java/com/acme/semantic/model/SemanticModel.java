@@ -54,7 +54,15 @@ public record SemanticModel(
 
   public record TrinoDefaults(String defaultCatalog, String defaultSchema) {}
 
-  public record Source(String catalog, String schema, String table) {}
+  public record Source(String catalog, String schema, String table, String select) {
+    public Source(String catalog, String schema, String table) {
+      this(catalog, schema, table, null);
+    }
+
+    public boolean derived() {
+      return select != null && !select.isBlank();
+    }
+  }
 
   public record Dimension(
       String name, String label, String description, String type, String sql, Boolean nullable) {}

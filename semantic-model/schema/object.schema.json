@@ -1,1 +1,73 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Semantic object","type":"object","required":["version","kind","metadata","spec"],"properties":{"version":{"const":1},"kind":{"const":"object"},"metadata":{"type":"object","required":["name","domain"],"properties":{"name":{"type":"string","pattern":"^[A-Za-z_][A-Za-z0-9_]*$"},"domain":{"type":"string","pattern":"^[A-Za-z_][A-Za-z0-9_]*$"}}},"spec":{"type":"object","required":["source","dimensions"],"properties":{"source":{"type":"object","required":["catalog","schema","table"]},"primaryKey":{"type":"array","items":{"type":"string"}},"dimensions":{"type":"array","items":{"type":"object","required":["name","type","sql"]}},"relationships":{"type":"array","items":{"type":"object","required":["name","targetObject","sourceFields","targetFields","cardinality"],"properties":{"cardinality":{"enum":["one_to_one","one_to_many","many_to_one","many_to_many"]},"defaultJoinType":{"enum":["inner","left","right","full"]}}}}}}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Semantic object",
+  "type": "object",
+  "required": ["version", "kind", "metadata", "spec"],
+  "properties": {
+    "version": {"const": 1},
+    "kind": {"const": "object"},
+    "metadata": {
+      "type": "object",
+      "required": ["name", "domain"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "domain": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["source", "dimensions"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["catalog", "schema", "table"],
+              "properties": {
+                "catalog": {"type": "string"},
+                "schema": {"type": "string"},
+                "table": {"type": "string"}
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["select"],
+              "properties": {
+                "select": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "primaryKey": {"type": "array", "items": {"type": "string"}},
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "type", "sql"]
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "targetObject",
+              "sourceFields",
+              "targetFields",
+              "cardinality"
+            ],
+            "properties": {
+              "cardinality": {
+                "enum": ["one_to_one", "one_to_many", "many_to_one", "many_to_many"]
+              },
+              "defaultJoinType": {"enum": ["inner", "left", "right", "full"]}
+            }
+          }
+        }
+      }
+    }
+  }
+}
