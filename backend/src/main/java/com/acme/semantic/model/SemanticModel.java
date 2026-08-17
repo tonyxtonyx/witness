@@ -42,9 +42,21 @@ public record SemanticModel(
       String label,
       String description,
       String owner,
-      List<String> tags) {
+      List<String> tags,
+      List<String> aliases) {
     public Metadata {
       tags = tags == null ? List.of() : List.copyOf(tags);
+      aliases = aliases == null ? List.of() : List.copyOf(aliases);
+    }
+
+    public Metadata(
+        String name,
+        String domain,
+        String label,
+        String description,
+        String owner,
+        List<String> tags) {
+      this(name, domain, label, description, owner, tags, List.of());
     }
   }
 

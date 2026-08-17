@@ -224,6 +224,16 @@ public class DefaultModelValidator implements ModelValidator {
             "metadata.name",
             "NAME_COLLISION",
             "Metric collides with dimension on base object");
+      SemanticModel.SemanticObject sameNameObject =
+          model.objects().get(metric.metadata().name());
+      if (sameNameObject != null && model.domain(sameNameObject).equals(model.domain(metric))) {
+        error(
+            out,
+            file,
+            "metadata.name",
+            "GLOBAL_ID_COLLISION",
+            "Metric and semantic object cannot share the same domain-qualified ID");
+      }
     }
     return ValidationResult.of(out);
   }
@@ -314,6 +324,18 @@ public class DefaultModelValidator implements ModelValidator {
       error(out, file, "metadata.description", "REQUIRED", "Description is required");
     if (blank(metadata.owner()))
       error(out, file, "metadata.owner", "REQUIRED", "Owner is required");
+    Set<String> aliases = new HashSet<>();
+    for (int i = 0; i < metadata.aliases().size(); i++) {
+      String alias = metadata.aliases().get(i);
+      if (blank(alias) || !aliases.add(alias.toLowerCase(Locale.ROOT))) {
+        error(
+            out,
+            file,
+            "metadata.aliases[" + i + "]",
+            "INVALID_ALIAS",
+            "Aliases must be non-empty and unique ignoring case");
+      }
+    }
   }
 
   private void validateSemanticType(

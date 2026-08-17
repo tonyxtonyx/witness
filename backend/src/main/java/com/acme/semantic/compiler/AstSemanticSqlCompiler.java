@@ -28,6 +28,7 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
           "date_trunc",
           "cast",
           "substring",
+          "starts_with",
           "abs",
           "round",
           "sum",
@@ -62,6 +63,7 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     if (plain.getJoins() != null)
       for (Join join : plain.getJoins()) context.add(requireTable(join.getRightItem()));
     StringBuilder out = new StringBuilder("SELECT ");
+    if (plain.getDistinct() != null) out.append("DISTINCT ");
     List<CompiledQuery.Column> columns = new ArrayList<>();
     boolean firstProjection = true;
     for (int i = 0; i < plain.getSelectItems().size(); i++) {
@@ -112,7 +114,7 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
         Table target = requireTable(join.getRightItem());
         if (join.getOnExpressions() == null || join.getOnExpressions().isEmpty())
           fail("42601", "JOIN requires ON");
-        validateRelationship(baseTable, target, join.getOnExpressions(), context);
+        validateRelationship(target, join.getOnExpressions(), context);
         out.append(
                 join.isLeft()
                     ? " LEFT JOIN "
@@ -146,6 +148,16 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
         out.append(expression(order.getExpression(), context, Usage.ORDER));
         if (!order.isAsc()) out.append(" DESC");
       }
+    }
+    if (plain.getOffset() != null) {
+      if (!(plain.getOffset().getOffset() instanceof LongValue)) {
+        fail("2201X", "OFFSET must be a literal between 0 and 10000");
+      }
+      LongValue offsetValue = (LongValue) plain.getOffset().getOffset();
+      if (offsetValue.getValue() < 0 || offsetValue.getValue() > 10_000) {
+        fail("2201X", "OFFSET must be a literal between 0 and 10000");
+      }
+      out.append(" OFFSET ").append(offsetValue.getValue());
     }
     long requested =
         plain.getLimit() != null && plain.getLimit().getRowCount() instanceof LongValue l
@@ -294,8 +306,18 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   }
 
   private void validateRelationship(
-      Table leftTable, Table rightTable, Collection<Expression> ons, Context c) {
-    String leftAlias = alias(leftTable), rightAlias = alias(rightTable);
+      Table rightTable, Collection<Expression> ons, Context c) {
+    String rightAlias = alias(rightTable);
+    Set<String> aliases = new LinkedHashSet<>();
+    for (Expression on : ons) collectAliases(on, aliases);
+    aliases.remove(rightAlias);
+    if (aliases.size() != 1) {
+      fail("42809", "JOIN condition must connect the joined object to exactly one existing alias");
+    }
+    String leftAlias = aliases.iterator().next();
+    if (!c.objects.containsKey(leftAlias)) {
+      fail("42P01", "Unknown semantic object alias in JOIN: " + leftAlias);
+    }
     var left = c.objects.get(leftAlias);
     var right = c.objects.get(rightAlias);
     Optional<SemanticModel.Relationship> fromLeft =
@@ -326,6 +348,20 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     } else {
       c.relationships.add(
           new JoinEdge(rightAlias, leftAlias, fromRight.get().name(), fromRight.get().cardinality()));
+    }
+  }
+
+  private void collectAliases(Expression expression, Set<String> aliases) {
+    if (expression instanceof Column column) {
+      if (column.getTable() == null || column.getTable().getName() == null) {
+        fail("42702", "JOIN columns must be qualified with semantic object aliases");
+      }
+      aliases.add(unquote(column.getTable().getName()));
+    } else if (expression instanceof BinaryExpression binary) {
+      collectAliases(binary.getLeftExpression(), aliases);
+      collectAliases(binary.getRightExpression(), aliases);
+    } else if (expression instanceof Parenthesis parenthesis) {
+      collectAliases(parenthesis.getExpression(), aliases);
     }
   }
 
@@ -394,26 +430,37 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
 
   private void validateFanout(Context context) {
     for (String measureAlias : context.measureAliases) {
-      for (JoinEdge relationship : context.relationships) {
-        boolean unsafe =
-            switch (relationship.cardinality()) {
-              case one_to_one -> false;
-              case many_to_one -> measureAlias.equals(relationship.targetAlias());
-              case one_to_many -> measureAlias.equals(relationship.sourceAlias());
-              case many_to_many ->
-                  measureAlias.equals(relationship.sourceAlias())
-                      || measureAlias.equals(relationship.targetAlias());
-            };
-        if (unsafe) {
-          fail(
-              "0A000",
-              "Aggregate from "
-                  + measureAlias
-                  + " may be duplicated by relationship "
-                  + relationship.name()
-                  + " ("
-                  + relationship.cardinality()
-                  + "); fan-out-safe aggregation is not yet supported");
+      Set<String> visited = new HashSet<>();
+      ArrayDeque<String> pending = new ArrayDeque<>();
+      visited.add(measureAlias);
+      pending.add(measureAlias);
+      while (!pending.isEmpty()) {
+        String current = pending.removeFirst();
+        for (JoinEdge relationship : context.relationships) {
+          boolean forward = current.equals(relationship.sourceAlias());
+          boolean reverse = current.equals(relationship.targetAlias());
+          if (!forward && !reverse) continue;
+          String next = forward ? relationship.targetAlias() : relationship.sourceAlias();
+          if (visited.contains(next)) continue;
+          boolean unsafe = switch (relationship.cardinality()) {
+            case one_to_one -> false;
+            case many_to_one -> reverse;
+            case one_to_many -> forward;
+            case many_to_many -> true;
+          };
+          if (unsafe) {
+            fail(
+                "0A000",
+                "Aggregate from "
+                    + measureAlias
+                    + " may be duplicated by relationship "
+                    + relationship.name()
+                    + " ("
+                    + relationship.cardinality()
+                    + "); fan-out-safe aggregation is not yet supported");
+          }
+          visited.add(next);
+          pending.addLast(next);
         }
       }
     }

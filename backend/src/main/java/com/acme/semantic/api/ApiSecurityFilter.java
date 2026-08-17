@@ -14,6 +14,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 @Component
 public class ApiSecurityFilter extends OncePerRequestFilter {
+  public static final String PRINCIPAL_ATTRIBUTE =
+      "com.acme.semantic.authenticatedPrincipal";
+  public static final String CORRELATION_ATTRIBUTE =
+      "com.acme.semantic.correlationId";
+
   private final SemanticProperties properties;
 
   public ApiSecurityFilter(SemanticProperties properties) {
@@ -27,6 +32,7 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
     String correlation = request.getHeader("X-Correlation-ID");
     if (correlation == null || correlation.isBlank()) correlation = UUID.randomUUID().toString();
     response.setHeader("X-Correlation-ID", correlation);
+    request.setAttribute(CORRELATION_ATTRIBUTE, correlation);
     MDC.put("correlationId", correlation);
     try {
       if (request.getRequestURI().startsWith("/api/")
@@ -41,6 +47,9 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
                     + correlation
                     + "\"}");
         return;
+      }
+      if (request.getRequestURI().startsWith("/api/")) {
+        request.setAttribute(PRINCIPAL_ATTRIBUTE, "api-key");
       }
       chain.doFilter(request, response);
     } finally {

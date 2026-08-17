@@ -1,10 +1,19 @@
 package com.acme.semantic.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "semantic")
 public record SemanticProperties(
-    String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab) {
+    String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab, Mcp mcp) {
+  @ConstructorBinding
+  public SemanticProperties {}
+
+  public SemanticProperties(
+      String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab) {
+    this(modelPath, apiKey, pgwire, trino, gitlab, null);
+  }
+
   public record Pgwire(
       boolean enabled,
       int port,
@@ -32,4 +41,21 @@ public record SemanticProperties(
       long pollMs,
       int connectTimeoutSeconds,
       int readTimeoutSeconds) {}
+
+  public record Mcp(
+      boolean enabled,
+      String endpoint,
+      int searchMaxResults,
+      int queryDefaultRows,
+      int queryMaxRows,
+      int dimensionDefaultRows,
+      int dimensionMaxRows,
+      int lineageMaxDepth,
+      int lineageMaxNodes,
+      boolean exposeCompiledSql,
+      boolean exposePhysicalLineage) {
+    public static Mcp defaults() {
+      return new Mcp(true, "/api/mcp", 50, 100, 500, 20, 100, 5, 250, false, false);
+    }
+  }
 }

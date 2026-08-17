@@ -11,7 +11,8 @@
       "required": ["name", "domain"],
       "properties": {
         "name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
-        "domain": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+        "domain": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "aliases": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
       }
     },
     "spec": {

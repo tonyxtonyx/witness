@@ -34,3 +34,15 @@ semantic:
     poll-ms: ${MODEL_POLL_MS:60000}
     connect-timeout-seconds: ${GITLAB_CONNECT_TIMEOUT_SECONDS:5}
     read-timeout-seconds: ${GITLAB_READ_TIMEOUT_SECONDS:20}
+  mcp:
+    enabled: ${MCP_ENABLED:true}
+    endpoint: ${MCP_ENDPOINT:/api/mcp}
+    search-max-results: ${MCP_SEARCH_MAX_RESULTS:50}
+    query-default-rows: ${MCP_QUERY_DEFAULT_ROWS:100}
+    query-max-rows: ${MCP_QUERY_MAX_ROWS:500}
+    dimension-default-rows: ${MCP_DIMENSION_DEFAULT_ROWS:20}
+    dimension-max-rows: ${MCP_DIMENSION_MAX_ROWS:100}
+    lineage-max-depth: ${MCP_LINEAGE_MAX_DEPTH:5}
+    lineage-max-nodes: ${MCP_LINEAGE_MAX_NODES:250}
+    expose-compiled-sql: ${MCP_EXPOSE_COMPILED_SQL:false}
+    expose-physical-lineage: ${MCP_EXPOSE_PHYSICAL_LINEAGE:false}

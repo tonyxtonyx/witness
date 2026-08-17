@@ -13,7 +13,7 @@ Design business meaning in visual builders or YAML, query it through SQL, and go
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-compatible-4169E1?logo=postgresql&logoColor=white)
 ![Status](https://img.shields.io/badge/status-MVP-6C5CE7)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Model example](#semantic-model) · [Connect with DBeaver](#connect-over-postgresql) · [Governance](#governance-modes)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture decisions](docs/architecture-decisions.md) · [Model example](#semantic-model) · [Connect with DBeaver](#connect-over-postgresql) · [Governance](#governance-modes)
 
 </div>
 
@@ -43,6 +43,7 @@ ORDER BY total_revenue DESC;
 - **Git-first semantic model** — objects, dimensions, relationships, and metrics live in human-readable YAML.
 - **Domains become schemas** — `retail.orders` and `ai_rnd.experiments` are discoverable from PostgreSQL clients.
 - **PostgreSQL-compatible endpoint** — connect with DBeaver or pgjdbc and browse the semantic catalog like a database.
+- **Governed MCP interface** — discover metadata, inspect context and lineage, compile typed queries, and execute small metric results through seven strict tools.
 - **AST-based SQL compiler** — registered semantic fields are compiled into physical Trino SQL without string substitution.
 - **Governed metrics** — reusable aggregations, filters, result types, formats, ownership, and descriptions.
 - **Safe-by-default joins** — declared relationships are validated and known fan-out risks are rejected instead of returning incorrect totals.
@@ -86,6 +87,9 @@ flowchart LR
     UI["React workspace"]
     JDBC["DBeaver / pgjdbc"]
     REST["REST API"]
+    MCP["MCP clients"]
+    MCPTOOLS["Seven stateless MCP tools"]
+    CORE["Semantic Core<br/>IDs · policies · planning · lineage"]
     PGWIRE["PostgreSQL wire server"]
     COMPILER["Semantic SQL compiler<br/>JSqlParser AST"]
     POOL["HikariCP"]
@@ -94,6 +98,9 @@ flowchart LR
 
     MODEL --> LOAD --> CATALOG
     UI --> REST
+    MCP --> MCPTOOLS --> CORE
+    CORE --> CATALOG
+    CORE --> COMPILER
     REST --> CATALOG
     JDBC --> PGWIRE --> CATALOG
     REST --> COMPILER
@@ -111,6 +118,9 @@ There are three deliberately separate storage concerns:
 | Business data | PostgreSQL in the demo; any Trino-accessible source in a real deployment |
 
 The application does **not** store semantic objects or metrics in PostgreSQL. The database contains business rows; the semantic model describes how those rows should be understood and queried.
+
+The rationale, trade-offs, and boundaries behind pgwire, Trino, and immutable catalog activation are
+recorded in the [architecture decision records](docs/architecture-decisions.md).
 
 ## Quick start
 
@@ -489,6 +499,24 @@ Key endpoint groups:
 
 Errors include a correlation ID. Unexpected server failures are logged internally while clients receive a generic response.
 
+## Model Context Protocol (MCP)
+
+Witness exposes a stateless Streamable HTTP endpoint at `http://localhost:8080/api/mcp`. It
+publishes exactly seven read-only discovery and analytical tools:
+
+1. `search_semantic_objects`
+2. `get_semantic_object`
+3. `get_metric_context`
+4. `get_dimension_values`
+5. `compile_semantic_query`
+6. `query_metrics`
+7. `get_lineage`
+
+Every request uses `X-API-Key`, stable domain-qualified IDs, the active semantic revision, and the
+same catalog, compiler, relationship rules, limits, and Trino executor as the rest of Witness. Raw
+SQL and caller-supplied identities are not part of the MCP contract. See the complete
+[MCP architecture, contracts, examples, security model, and limitations](docs/mcp.md).
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
@@ -511,6 +539,17 @@ Errors include a correlation ID. Unexpected server failures are logged internall
 | `GITLAB_CONNECT_TIMEOUT_SECONDS` | `5` | GitLab connection timeout |
 | `GITLAB_READ_TIMEOUT_SECONDS` | `20` | GitLab response timeout |
 | `MODEL_POLL_MS` | `60000` | Default-branch polling interval |
+| `MCP_ENABLED` | `true` | Enable the stateless MCP endpoint |
+| `MCP_ENDPOINT` | `/api/mcp` | Streamable HTTP endpoint path |
+| `MCP_SEARCH_MAX_RESULTS` | `50` | Maximum discovery page |
+| `MCP_QUERY_DEFAULT_ROWS` | `100` | Default MCP result rows |
+| `MCP_QUERY_MAX_ROWS` | `500` | Hard MCP result-row limit |
+| `MCP_DIMENSION_DEFAULT_ROWS` | `20` | Default dimension-values page |
+| `MCP_DIMENSION_MAX_ROWS` | `100` | Maximum dimension-values page |
+| `MCP_LINEAGE_MAX_DEPTH` | `5` | Maximum lineage depth |
+| `MCP_LINEAGE_MAX_NODES` | `250` | Maximum lineage graph nodes |
+| `MCP_EXPOSE_COMPILED_SQL` | `false` | Allow SQL only when policy also permits it |
+| `MCP_EXPOSE_PHYSICAL_LINEAGE` | `false` | Allow physical nodes only when policy also permits it |
 
 ## Development
 
@@ -540,11 +579,13 @@ npm run dev
 ├── backend/src/main/java/com/acme/semantic/
 │   ├── api/          REST controllers, security, object and metric CRUD
 │   ├── catalog/      active immutable semantic model
+│   ├── core/         stable IDs, policies, discovery, typed queries, and lineage
 │   ├── compiler/     AST validation and semantic SQL compilation
 │   ├── config/       application and connection-pool configuration
 │   ├── execution/    Trino query execution
 │   ├── gitlab/       local and GitLab model repositories
 │   ├── model/        model records and YAML parser
+│   ├── mcp/          strict schemas and stateless MCP transport adapter
 │   ├── pgwire/       PostgreSQL protocol and metadata facade
 │   └── validation/   model and governance validation
 ├── backend/src/test/ Java unit and integration tests
@@ -569,6 +610,7 @@ A revision is activated only when the complete model passes validation, includin
 - Fail-closed model-expression AST policy
 - Fail-closed derived-source SELECT policy with fully qualified physical tables
 - Metric fields resolved through registered dimensions
+- MCP canonical query types, unique relationship paths, and bounded result plans
 
 If polling, parsing, or validation fails, the previous valid revision remains active and the catalog reports an unhealthy status.
 
@@ -577,10 +619,12 @@ If polling, parsing, or validation fails, the previous valid revision remains ac
 This repository is a working vertical MVP, not a production-ready database server.
 
 - REST authentication uses one development API key; production OIDC, RBAC, and attributable audit events are not implemented yet.
+- MCP has per-tool audit events, but uses the same single API-key principal until production OIDC/RBAC is introduced.
+- YAML schema v1 does not model row/column policies, freshness SLAs, currency conversion, or source timezones; the default MCP policy does not invent them, while Semantic Core exposes typed production policy hooks.
 - The UI's current “verified” badge is inferred from owner and description; it is not a persisted certification workflow.
 - pgwire uses cleartext password authentication and no TLS; keep it local or behind trusted TLS termination.
 - PostgreSQL protocol coverage is intentionally narrow: no COPY, cursors, LISTEN/NOTIFY, cancel requests, or arbitrary system catalogs.
-- Fan-out-unsafe metrics are rejected; full symmetric aggregation and multi-hop planning remain roadmap work.
+- Canonical MCP queries support unique multi-hop relationship paths and reject fan-out; full symmetric aggregation remains roadmap work.
 - GitLab is mocked in automated tests; a real GitLab API is used only when governed mode is configured.
 - The demo PostgreSQL container has no persistent data volume and is recreated from `init.sql`.
 
