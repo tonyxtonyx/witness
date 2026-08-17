@@ -1,0 +1,135 @@
+package com.acme.semantic.api;
+
+import com.acme.semantic.catalog.SemanticCatalog;
+import com.acme.semantic.gitlab.ModelRepository;
+import com.acme.semantic.gitlab.MutableModelRepository;
+import com.acme.semantic.model.ModelParser;
+import com.acme.semantic.model.ModelRevision;
+import com.acme.semantic.model.SemanticModel;
+import com.acme.semantic.validation.ModelValidator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+public class ObjectCrudService {
+  private static final String IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*";
+  private final ModelRepository repository;
+  private final SemanticCatalog catalog;
+  private final ModelParser parser;
+  private final ModelValidator validator;
+  private final ObjectMapper yaml =
+      new ObjectMapper(new YAMLFactory()).setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+  public ObjectCrudService(
+      ModelRepository repository,
+      SemanticCatalog catalog,
+      ModelParser parser,
+      ModelValidator validator) {
+    this.repository = repository;
+    this.catalog = catalog;
+    this.parser = parser;
+    this.validator = validator;
+  }
+
+  public synchronized SemanticModel.SemanticObject update(String name, ObjectInput input) {
+    SemanticModel.SemanticObject existing = require(name);
+    SemanticModel.SemanticObject object = normalize(input);
+    if (!name.equals(object.metadata().name())) {
+      throw new IllegalArgumentException("Object name in the path and body must match");
+    }
+    String path = path(object);
+    Set<String> deletions = path.equals(existing.file()) ? Set.of() : Set.of(existing.file());
+    validateAndApply(Map.of(path, serialize(object)), deletions);
+    return catalog.model().objects().get(name);
+  }
+
+  public synchronized SemanticModel.SemanticObject create(ObjectInput input) {
+    SemanticModel.SemanticObject object = normalize(input);
+    if (catalog.model().objects().containsKey(object.metadata().name())) {
+      throw new ResponseStatusException(
+          HttpStatus.CONFLICT, "Object already exists: " + object.metadata().name());
+    }
+    String path = path(object);
+    validateAndApply(Map.of(path, serialize(object)), Set.of());
+    return catalog.model().objects().get(object.metadata().name());
+  }
+
+  public synchronized void delete(String name) {
+    SemanticModel.SemanticObject existing = require(name);
+    validateAndApply(Map.of(), Set.of(existing.file()));
+  }
+
+  private SemanticModel.SemanticObject require(String name) {
+    SemanticModel.SemanticObject object = catalog.model().objects().get(name);
+    if (object == null) {
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown object: " + name);
+    }
+    return object;
+  }
+
+  private SemanticModel.SemanticObject normalize(ObjectInput input) {
+    if (input == null || input.metadata() == null || input.spec() == null) {
+      throw new IllegalArgumentException("metadata and spec are required");
+    }
+    return new SemanticModel.SemanticObject(1, "object", input.metadata(), input.spec(), null);
+  }
+
+  private String path(SemanticModel.SemanticObject object) {
+    String name = object.metadata().name();
+    String domain = object.metadata().domain();
+    if (name == null || !name.matches(IDENTIFIER)) {
+      throw new IllegalArgumentException("Object name must be a safe SQL identifier");
+    }
+    if (domain == null || !domain.matches(IDENTIFIER)) {
+      throw new IllegalArgumentException(
+          "Object domain must be a safe PostgreSQL schema identifier");
+    }
+    return "domains/" + domain + "/objects/" + name + ".yaml";
+  }
+
+  private String serialize(SemanticModel.SemanticObject object) {
+    try {
+      return yaml.writeValueAsString(
+          new ObjectDocument(1, "object", object.metadata(), object.spec()));
+    } catch (Exception e) {
+      throw new IllegalStateException("Cannot serialize semantic object", e);
+    }
+  }
+
+  private void validateAndApply(Map<String, String> upserts, Set<String> deletions) {
+    if (!(repository instanceof MutableModelRepository mutable)) {
+      throw new ResponseStatusException(
+          HttpStatus.METHOD_NOT_ALLOWED,
+          "Direct object CRUD is disabled for GitLab mode; submit a model change instead");
+    }
+    ModelRevision current = repository.loadDefaultRevision();
+    Map<String, String> candidate = new TreeMap<>(current.files());
+    deletions.forEach(candidate::remove);
+    candidate.putAll(upserts);
+    SemanticModel parsed = parser.parse(new ModelRevision("candidate", candidate));
+    var validation = validator.validate(parsed);
+    if (!validation.valid()) {
+      var first = validation.errors().getFirst();
+      throw new IllegalArgumentException(
+          first.file() + ":" + first.path() + ": " + first.message());
+    }
+    mutable.apply(upserts, deletions);
+    var status = catalog.reload();
+    if (!status.healthy()) {
+      throw new IllegalStateException(
+          "Object was persisted but the active model could not reload: " + status.message());
+    }
+  }
+
+  public record ObjectInput(SemanticModel.Metadata metadata, SemanticModel.ObjectSpec spec) {}
+
+  private record ObjectDocument(
+      int version, String kind, SemanticModel.Metadata metadata, SemanticModel.ObjectSpec spec) {}
+}

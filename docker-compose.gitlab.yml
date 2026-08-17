@@ -1,0 +1,49 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:19.2.0-ce.0
+    hostname: gitlab
+    restart: unless-stopped
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8929'
+        gitlab_rails['initial_root_password'] = 'WitnessDemo123!'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+        gitlab_rails['signup_enabled'] = false
+        gitlab_rails['usage_ping_enabled'] = false
+        prometheus_monitoring['enable'] = false
+        gitlab_kas['enable'] = false
+        registry['enable'] = false
+        puma['worker_processes'] = 0
+        sidekiq['concurrency'] = 10
+    ports:
+      - "127.0.0.1:8929:8929"
+      - "127.0.0.1:2224:22"
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    shm_size: "256m"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10"]
+      interval: 15s
+      timeout: 15s
+      retries: 40
+      start_period: 180s
+
+  backend:
+    environment:
+      GITLAB_ENABLED: "true"
+      GITLAB_BASE_URL: http://gitlab:8929
+      GITLAB_PROJECT_ID: root/witness
+      GITLAB_TOKEN: ${WITNESS_GITLAB_TOKEN:-glpat-witness-demo-token-2026}
+      GITLAB_DEFAULT_BRANCH: main
+      GITLAB_MODEL_PATH: semantic-model
+      MODEL_POLL_MS: "5000"
+    depends_on:
+      gitlab:
+        condition: service_healthy
+
+volumes:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:
