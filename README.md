@@ -408,7 +408,16 @@ semantic
     └── experiments
 ```
 
-Schemas, objects, columns, primary keys, imported keys, and metrics are generated from the active semantic model. They are virtual metadata—not physical PostgreSQL tables created by this application.
+Schemas, objects, columns, primary keys, foreign keys, and metrics are generated from the active
+semantic model. DBeaver can use those virtual keys to draw the semantic relationships in its ER
+diagram. They are metadata annotations—not physical PostgreSQL tables or enforced source
+constraints created by this application.
+
+Relationship cardinality determines the relational direction: `many_to_one` and `one_to_one`
+project from the declaring object to the target, while `one_to_many` is inverted so the many side
+owns the virtual FK. A `many_to_many` relationship requires an explicit bridge object before it can
+be represented as foreign keys. The full rationale is recorded in
+[ADR-004](docs/architecture-decisions.md#adr-004-project-semantic-relationships-as-virtual-postgresql-foreign-keys).
 
 ### Supported SQL behavior
 

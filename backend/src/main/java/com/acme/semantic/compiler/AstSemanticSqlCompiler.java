@@ -41,7 +41,6 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   public CompiledQuery compile(String sql, SemanticModel model) {
     if (sql == null || sql.isBlank() || sql.length() > MAX_SQL)
       fail("42601", "SQL must be non-empty and at most 64 KiB");
-    if (sql.contains("--") || sql.contains("/*")) fail("42601", "SQL comments are not supported");
     Statement statement;
     try {
       statement = CCJSqlParserUtil.parse(sql);
@@ -56,6 +55,13 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     } catch (Exception e) {
       throw new SqlCompilationException(
           "0A000", "Set operations and nested SELECT are not supported");
+    }
+    if ((select.getWithItemsList() != null && !select.getWithItemsList().isEmpty())
+        || (plain.getIntoTables() != null && !plain.getIntoTables().isEmpty())
+        || plain.getIntoTempTable() != null
+        || select.getForMode() != null
+        || select.getForUpdateTable() != null) {
+      fail("0A000", "CTE, SELECT INTO, and row-locking clauses are not supported");
     }
     Context context = new Context(model);
     Table baseTable = requireTable(plain.getFromItem());

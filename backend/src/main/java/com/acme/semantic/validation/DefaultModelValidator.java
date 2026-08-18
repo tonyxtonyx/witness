@@ -94,9 +94,25 @@ public class DefaultModelValidator implements ModelValidator {
               "spec.primaryKey",
               "UNKNOWN_FIELD",
               "Primary key field does not exist: " + pk);
+      Set<String> relationshipNames = new HashSet<>();
       for (int i = 0; i < object.spec().relationships().size(); i++) {
         var rel = object.spec().relationships().get(i);
         String p = "spec.relationships[" + i + "]";
+        if (blank(rel.name()) || !SAFE_IDENTIFIER.matcher(rel.name()).matches()) {
+          error(
+              out,
+              file,
+              p + ".name",
+              "INVALID_IDENTIFIER",
+              "Relationship name must be a safe non-empty identifier");
+        } else if (!relationshipNames.add(rel.name().toLowerCase(Locale.ROOT))) {
+          error(
+              out,
+              file,
+              p + ".name",
+              "DUPLICATE_RELATIONSHIP",
+              "Relationship names must be unique within an object");
+        }
         var target = model.objects().get(rel.targetObject());
         if (target == null) {
           error(

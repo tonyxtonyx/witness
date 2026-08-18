@@ -54,6 +54,43 @@ class ModelValidationTest {
         .anyMatch(error -> error.code().equals("INCOMPATIBLE_RESULT_TYPE"));
   }
 
+  @Test
+  void rejectsDuplicateRelationshipNamesWithinAnObjectIgnoringCase() {
+    SemanticModel model = TestModels.demo();
+    var objects = new LinkedHashMap<>(model.objects());
+    var orders = objects.get("orders");
+    var relationships = new java.util.ArrayList<>(orders.spec().relationships());
+    var first = relationships.getFirst();
+    relationships.add(
+        new SemanticModel.Relationship(
+            first.name().toUpperCase(java.util.Locale.ROOT),
+            first.targetObject(),
+            first.sourceFields(),
+            first.targetFields(),
+            first.cardinality(),
+            first.defaultJoinType()));
+    objects.put(
+        "orders",
+        new SemanticModel.SemanticObject(
+            orders.version(),
+            orders.kind(),
+            orders.metadata(),
+            new SemanticModel.ObjectSpec(
+                orders.spec().source(),
+                orders.spec().primaryKey(),
+                orders.spec().dimensions(),
+                relationships),
+            orders.file()));
+    SemanticModel invalid =
+        new SemanticModel(
+            model.project(), objects, model.metrics(), model.revision(), model.loadedAt());
+
+    var result = new DefaultModelValidator().validate(invalid);
+
+    assertThat(result.errors())
+        .anyMatch(error -> error.code().equals("DUPLICATE_RELATIONSHIP"));
+  }
+
   private SemanticModel.Metric metric(
       String name, SemanticModel.Aggregation aggregation, String expression, String resultType) {
     return new SemanticModel.Metric(

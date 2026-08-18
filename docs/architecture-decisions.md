@@ -16,6 +16,7 @@ a new ADR.
 | [ADR-001](#adr-001-expose-semantic-sql-through-a-bounded-postgresql-wire-protocol-facade) | Expose semantic SQL through a bounded PostgreSQL wire protocol façade | Accepted |
 | [ADR-002](#adr-002-use-trino-as-the-physical-query-execution-engine) | Use Trino as the physical query execution engine | Accepted |
 | [ADR-003](#adr-003-serve-a-validated-immutable-catalog-snapshot) | Serve a validated immutable catalog snapshot | Accepted |
+| [ADR-004](#adr-004-project-semantic-relationships-as-virtual-postgresql-foreign-keys) | Project semantic relationships as virtual PostgreSQL foreign keys | Accepted |
 
 ```mermaid
 flowchart LR
@@ -309,9 +310,89 @@ Revisit full-snapshot activation if catalog size makes complete reloads too expe
 requires coordinated activation across replicas, or users need time-travel queries. Any incremental
 design must preserve atomic graph validation, explicit revisions, and last-known-good rollback.
 
+## ADR-004: Project semantic relationships as virtual PostgreSQL foreign keys
+
+- **Status:** Accepted
+- **Date:** 2026-08-18
+- **Owners:** Witness maintainers
+
+### Context
+
+Witness relationships already define governed joins between semantic objects. PostgreSQL-aware
+tools, however, understand object topology through primary-key and foreign-key metadata. If the
+pgwire façade exposes only tables and columns, DBeaver cannot draw the same relationships that the
+semantic compiler uses. Maintaining a second JDBC-only relationship definition would create drift.
+
+The semantic objects can be backed by physical tables, derived `SELECT` statements, or sources in
+different Trino catalogs. Therefore these keys cannot truthfully be advertised as constraints
+physically enforced by PostgreSQL or by the underlying data sources.
+
+### Decision
+
+The active semantic relationship is the single source of truth. Witness deterministically projects
+validated relationships into read-only, non-enforced PostgreSQL key metadata:
+
+| Semantic cardinality | Virtual relational projection |
+|---|---|
+| `many_to_one` | Declaring/source object FK → target object PK |
+| `one_to_one` | Declaring/source object FK → target object PK |
+| `one_to_many` | Target/many object FK → declaring/source object PK |
+| `many_to_many` | No single FK; model an explicit bridge object with two relationships |
+
+The projection follows these rules:
+
+1. `sourceFields` and `targetFields` preserve the declared composite-key pairing. The existing
+   cardinality validation proves that the referenced one-side fields are that object's primary key.
+2. Domains become key schemas, so cross-domain relationships remain visible. A derived object is
+   treated exactly like a table-backed object because the metadata describes its semantic grain,
+   not source DDL.
+3. Relationship names become FK constraint names. Names must be safe SQL identifiers and are unique
+   within the declaring object, ignoring case.
+4. The pgwire façade answers pgjdbc's standard `getPrimaryKeys`, `getImportedKeys`,
+   `getExportedKeys`, and `getCrossReference` catalog queries from the same active snapshot.
+5. `information_schema.table_constraints`, `key_column_usage`, and
+   `referential_constraints` expose the same projection. Virtual constraints report
+   `enforced = NO`, `NO ACTION` update/delete rules, and non-deferrable JDBC metadata.
+6. The projection is metadata-only. It creates no PostgreSQL DDL, does not mutate a physical
+   source, and does not add runtime referential-integrity checks to query execution.
+
+### Consequences
+
+Positive consequences:
+
+- DBeaver and other JDBC tools can render an ER graph consistent with Witness join semantics.
+- There is no duplicate relationship registry to synchronize with YAML.
+- Composite, cross-domain, and derived-object relationships remain discoverable.
+- Metadata remains available without Trino or a PostgreSQL metadata database.
+
+Costs and limitations:
+
+- A displayed FK is a semantic assertion, not proof that source rows satisfy referential integrity.
+- A `many_to_many` edge cannot be represented honestly as one FK and is intentionally omitted.
+- Client tools may display virtual keys as ordinary database constraints unless users read the
+  `enforced` metadata or Witness documentation.
+- Additional client-specific catalog queries may require compatibility work in the bounded pgwire
+  façade.
+
+### Alternatives considered
+
+- **Create constraints in source systems.** Rejected because Witness may not own those systems,
+  derived objects are not physical tables, and cross-source constraints cannot be enforced there.
+- **Store JDBC annotations separately.** Rejected because two relationship definitions can drift and
+  weaken Git governance.
+- **Expose every cardinality as source-to-target FK.** Rejected because `one_to_many` would put the FK
+  on the wrong relational side and `many_to_many` is not a single foreign key.
+- **Expose no keys.** Rejected because it discards useful governed topology in standard data tools.
+
+### Revisit when
+
+Revisit this decision if Witness introduces source profiling or integrity guarantees, supports
+unique keys other than object primary keys, models bridge tables implicitly, or adopts a catalog
+service capable of expressing semantic constraints more precisely than JDBC metadata.
+
 ## Cross-cutting invariants
 
-The three decisions establish these invariants:
+The four decisions establish these invariants:
 
 - pgwire presents semantic metadata; it is not the metadata or business-data store.
 - Trino executes physical queries; it is not the semantic source of truth.
@@ -319,5 +400,7 @@ The three decisions establish these invariants:
 - Protocol adapters must use the shared catalog, compiler, policies, and executor rather than create
   private query paths.
 - Metadata reads should remain possible without executing a Trino query.
+- Virtual PostgreSQL keys must be derived from the active semantic relationship graph and must never
+  imply physical enforcement.
 - Every production hardening change must preserve bounded inputs, read-only execution, revision
   traceability, and last-known-good activation.
