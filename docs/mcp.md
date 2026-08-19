@@ -115,6 +115,9 @@ aliases, descriptions, and tags to these IDs.
   "orderBy": [
     {"member": "retail.total_revenue", "direction": "desc"}
   ],
+  "joinPaths": [
+    {"to": "retail.customers", "via": ["order_customer"]}
+  ],
   "limit": 100,
   "timezone": "Europe/Moscow"
 }
@@ -126,9 +129,11 @@ accept dimensions only in schema v1; arbitrary expressions, raw `WHERE`, SQL, cr
 identity fields are rejected. Time granularities are `day`, `week`, `month`, `quarter`, and
 `year` and apply only to date/timestamp dimensions.
 
-The planner resolves one deterministic shortest path through declared relationships. Missing and
-ambiguous paths fail. Each metric is checked across the complete path; a join that could duplicate
-its base grain fails before execution.
+The planner resolves one deterministic shortest path through declared relationships. Missing paths
+fail, and ambiguous paths report the competing relationship-name lists. A caller can select one
+with `joinPaths`, where each `via` list must form a readable connected chain from the query base to
+`to`. Each metric is checked across the complete chosen path; an explicit path cannot bypass the
+fan-out check.
 
 ## Tools
 
@@ -495,8 +500,8 @@ For manual protocol inspection, point an MCP Inspector-compatible client at
   source-timezone metadata.
 - Schema v1 certification is inferred from complete owner and description metadata; a
   revision-bound approval/certification record is not modeled yet.
-- Timezone IDs are validated and normalized. Timestamp bucketing currently uses the configured
-  Trino session timezone because source timezone is not modeled.
+- Timezone IDs are validated and normalized. Timestamp dimensions are assumed to be stored in UTC
+  and are converted to the requested zone before bucketing; date dimensions are not converted.
 - Metric filters in ad hoc canonical queries accept dimensions only. Governed metric-definition
   filters are always applied by the compiler.
 - Query execution is synchronous and intentionally small. If long-running workloads are needed,
@@ -504,7 +509,7 @@ For manual protocol inspection, point an MCP Inspector-compatible client at
   MCP.
 - Client disconnect cancellation does not currently propagate to Trino; statement timeout remains
   the hard execution bound.
-- Physical lineage is opt-in and currently covers direct table sources. Derived SELECT source
-  tables remain hidden until a reusable, policy-aware physical lineage extractor exists in Core.
+- Physical lineage is opt-in and includes the fully qualified tables parsed from governed derived
+  SELECT sources when the caller is authorized to view it.
 - MCP is read-only. Future authoring tools should call the existing validated GitLab change/MR
   service and should be introduced as separate, explicitly reviewed tool contracts.

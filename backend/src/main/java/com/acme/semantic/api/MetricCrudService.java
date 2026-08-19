@@ -36,23 +36,24 @@ public class MetricCrudService {
 
   public synchronized SemanticModel.Metric create(MetricInput input) {
     SemanticModel.Metric metric = normalize(input);
-    if (catalog.model().metrics().containsKey(metric.metadata().name()))
+    String id = catalog.model().metricId(metric);
+    if (catalog.model().metrics().containsKey(id))
       throw new ResponseStatusException(
-          HttpStatus.CONFLICT, "Metric already exists: " + metric.metadata().name());
+          HttpStatus.CONFLICT, "Metric already exists: " + id);
     String path = path(metric);
     validateAndApply(Map.of(path, serialize(metric)), Set.of());
-    return catalog.model().metrics().get(metric.metadata().name());
+    return catalog.model().metricById(id).orElseThrow();
   }
 
   public synchronized SemanticModel.Metric update(String name, MetricInput input) {
     SemanticModel.Metric existing = require(name);
     SemanticModel.Metric metric = normalize(input);
-    if (!name.equals(metric.metadata().name()))
+    if (!existing.metadata().name().equals(metric.metadata().name()))
       throw new IllegalArgumentException("Metric name in the path and body must match");
     String path = path(metric);
     Set<String> deletions = path.equals(existing.file()) ? Set.of() : Set.of(existing.file());
     validateAndApply(Map.of(path, serialize(metric)), deletions);
-    return catalog.model().metrics().get(name);
+    return catalog.model().metricById(catalog.model().metricId(metric)).orElseThrow();
   }
 
   public synchronized void delete(String name) {
@@ -61,10 +62,7 @@ public class MetricCrudService {
   }
 
   private SemanticModel.Metric require(String name) {
-    SemanticModel.Metric metric = catalog.model().metrics().get(name);
-    if (metric == null)
-      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown metric: " + name);
-    return metric;
+    return ApiModelResolver.metric(catalog.model(), name);
   }
 
   private SemanticModel.Metric normalize(MetricInput input) {
@@ -73,8 +71,12 @@ public class MetricCrudService {
     String name = input.metadata().name();
     if (name == null || !name.matches(IDENTIFIER))
       throw new IllegalArgumentException("Metric name must be a safe SQL identifier");
-    var base = catalog.model().objects().get(input.spec().baseObject());
     String domain = input.metadata().domain();
+    var baseResolution = catalog.model().resolveObject(input.spec().baseObject(), domain);
+    if (baseResolution.ambiguous())
+      throw ApiModelResolver.ambiguous(
+          "base object", input.spec().baseObject(), baseResolution.candidates());
+    var base = baseResolution.value();
     if ((domain == null || domain.isBlank()) && base != null) domain = catalog.model().domain(base);
     var metadata =
         new SemanticModel.Metadata(
@@ -83,7 +85,8 @@ public class MetricCrudService {
             input.metadata().label(),
             input.metadata().description(),
             input.metadata().owner(),
-            input.metadata().tags());
+            input.metadata().tags(),
+            input.metadata().aliases());
     return new SemanticModel.Metric(1, "metric", metadata, input.spec(), null);
   }
 

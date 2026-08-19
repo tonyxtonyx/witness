@@ -1,13 +1,17 @@
 package com.acme.semantic.gitlab;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.ExpectedCount.once;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.acme.semantic.config.SemanticProperties;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
+import java.util.Set;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -63,6 +67,102 @@ class GitLabModelRepositoryTest {
         .containsEntry("project.yaml", "project")
         .containsEntry("objects/orders.yaml", "orders");
     server.verify();
+  }
+
+  @Test
+  void createsMergeRequestUsingRevisionAndTreeWithoutDownloadingFiles() {
+    RestClient.Builder builder = RestClient.builder();
+    MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+    SemanticProperties properties = properties();
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/branches/main")))
+        .andRespond(withSuccess("{\"commit\":{\"id\":\"abc123\"}}", MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/tree")))
+        .andRespond(
+            withSuccess(
+                "[{\"type\":\"blob\",\"path\":\"semantic-model/objects/orders.yaml\"}]",
+                MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/branches?")))
+        .andRespond(withSuccess());
+    server
+        .expect(once(), requestTo(Matchers.endsWith("/repository/commits")))
+        .andExpect(
+            jsonPath("$.actions[*].action")
+                .value(Matchers.containsInAnyOrder("update", "create")))
+        .andRespond(withSuccess("{\"id\":\"commit-1\"}", MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.endsWith("/merge_requests")))
+        .andRespond(
+            withSuccess(
+                "{\"iid\":7,\"web_url\":\"https://gitlab.example/mr/7\"}",
+                MediaType.APPLICATION_JSON));
+    ChangeSet change =
+        new ChangeSet(
+            Map.of("objects/orders.yaml", "updated", "objects/new.yaml", "created"),
+            Set.of(),
+            "Update model",
+            "Description",
+            "Update semantic model",
+            "abc123");
+
+    ChangeResult result = new GitLabModelRepository(properties, builder).createMergeRequest(change);
+
+    assertThat(result.commitSha()).isEqualTo("commit-1");
+    assertThat(result.mergeRequest().id()).isEqualTo(7);
+    server.verify();
+  }
+
+  @Test
+  void rejectsNullMergeRequestResponseWithClearError() {
+    RestClient.Builder builder = RestClient.builder();
+    MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+    SemanticProperties properties = properties();
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/branches/main")))
+        .andRespond(withSuccess("{\"commit\":{\"id\":\"abc123\"}}", MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/tree")))
+        .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.containsString("/repository/branches?")))
+        .andRespond(withSuccess());
+    server
+        .expect(once(), requestTo(Matchers.endsWith("/repository/commits")))
+        .andRespond(withSuccess("{\"id\":\"commit-1\"}", MediaType.APPLICATION_JSON));
+    server
+        .expect(once(), requestTo(Matchers.endsWith("/merge_requests")))
+        .andRespond(withSuccess());
+    ChangeSet change =
+        new ChangeSet(
+            Map.of("objects/new.yaml", "created"),
+            Set.of(),
+            "Update model",
+            null,
+            "Update semantic model",
+            "abc123");
+
+    assertThatThrownBy(
+            () -> new GitLabModelRepository(properties, builder).createMergeRequest(change))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("GitLab merge request response was incomplete");
+    server.verify();
+  }
+
+  private SemanticProperties properties() {
+    var gitlab =
+        new SemanticProperties.Gitlab(
+            true,
+            "https://gitlab.example",
+            "group/project",
+            "token",
+            "main",
+            "semantic-model",
+            60_000,
+            1,
+            2);
+    return new SemanticProperties("semantic-model", "test", null, null, gitlab);
   }
 
   private void expectFile(MockRestServiceServer server, String encodedPath, String content) {

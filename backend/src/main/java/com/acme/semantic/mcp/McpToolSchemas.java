@@ -76,6 +76,10 @@ final class McpToolSchemas {
         object(
             properties("member", string(), "direction", enumeration("asc", "desc")),
             List.of("member"));
+    Map<String, Object> joinPath =
+        object(
+            properties("to", string(), "via", array(string(), 20, 1)),
+            List.of("to", "via"));
     return object(
         properties(
             "metrics", array(string(), 20, requireMetric ? 1 : null),
@@ -83,7 +87,8 @@ final class McpToolSchemas {
             "filters", filterSchema(),
             "orderBy", array(order, 20),
             "limit", integer(1, config.queryMaxRows()),
-            "timezone", string()),
+            "timezone", string(),
+            "joinPaths", array(joinPath, 20)),
         requireMetric ? List.of("metrics") : List.of());
   }
 
@@ -239,8 +244,10 @@ final class McpToolSchemas {
                 "severity", string(),
                 "message", string(),
                 "path", string(),
-                "member", nullable(string())),
-            List.of("code", "severity", "message", "path"));
+                "member", nullable(string()),
+                "details", openObject(),
+                "suggestions", array(string())),
+            List.of("code", "severity", "message", "path", "details", "suggestions"));
     Map<String, Object> plan =
         object(
             properties(

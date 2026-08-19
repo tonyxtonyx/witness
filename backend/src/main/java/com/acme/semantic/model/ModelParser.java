@@ -16,8 +16,8 @@ public class ModelParser {
 
   public SemanticModel parse(ModelRevision revision) {
     Project project = null;
-    Map<String, SemanticObject> objects = new LinkedHashMap<>();
-    Map<String, Metric> metrics = new LinkedHashMap<>();
+    List<SemanticObject> parsedObjects = new ArrayList<>();
+    List<Metric> parsedMetrics = new ArrayList<>();
     for (var entry : revision.files().entrySet()) {
       try {
         JsonNode root = yaml.readTree(entry.getValue());
@@ -29,23 +29,13 @@ public class ModelParser {
             SemanticObject value =
                 new SemanticObject(
                     raw.version(), raw.kind(), raw.metadata(), raw.spec(), entry.getKey());
-            if (objects.putIfAbsent(value.metadata().name(), value) != null)
-              throw new ModelParseException(
-                  entry.getKey(),
-                  "metadata.name",
-                  "DUPLICATE_OBJECT",
-                  "Duplicate object " + value.metadata().name());
+            parsedObjects.add(value);
           }
           case "metric" -> {
             Metric raw = yaml.treeToValue(root, Metric.class);
             Metric value =
                 new Metric(raw.version(), raw.kind(), raw.metadata(), raw.spec(), entry.getKey());
-            if (metrics.putIfAbsent(value.metadata().name(), value) != null)
-              throw new ModelParseException(
-                  entry.getKey(),
-                  "metadata.name",
-                  "DUPLICATE_METRIC",
-                  "Duplicate metric " + value.metadata().name());
+            parsedMetrics.add(value);
           }
           default ->
               throw new ModelParseException(
@@ -61,7 +51,29 @@ public class ModelParser {
     if (project == null)
       throw new ModelParseException(
           "project.yaml", "$", "MISSING_PROJECT", "project.yaml is required");
+    Map<String, SemanticObject> objects = new LinkedHashMap<>();
+    for (SemanticObject value : parsedObjects) {
+      String id = qualifiedId(project, value.metadata());
+      if (objects.putIfAbsent(id, value) != null)
+        throw new ModelParseException(
+            value.file(), "metadata.name", "DUPLICATE_OBJECT", "Duplicate object " + id);
+    }
+    Map<String, Metric> metrics = new LinkedHashMap<>();
+    for (Metric value : parsedMetrics) {
+      String id = qualifiedId(project, value.metadata());
+      if (metrics.putIfAbsent(id, value) != null)
+        throw new ModelParseException(
+            value.file(), "metadata.name", "DUPLICATE_METRIC", "Duplicate metric " + id);
+    }
     return new SemanticModel(project, objects, metrics, revision.revision(), Instant.now());
+  }
+
+  private String qualifiedId(Project project, Metadata metadata) {
+    String domain =
+        metadata.domain() == null || metadata.domain().isBlank()
+            ? project.spec().semanticSchema()
+            : metadata.domain();
+    return domain + "." + metadata.name();
   }
 
   private String requiredText(JsonNode node, String field) {

@@ -70,7 +70,7 @@ class ModelExpressionPolicyTest {
 
   @Test
   void resolvesMetricColumnsOnlyThroughRegisteredDimensions() {
-    var orders = TestModels.demo().objects().get("orders");
+    var orders = TestModels.demo().objects().get("retail.orders");
 
     assertThat(
             policy.renderMetric(

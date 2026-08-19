@@ -11,7 +11,8 @@ afterEach(()=>cleanup());
 describe('catalog',()=>{
   afterEach(()=>vi.restoreAllMocks());
   it('renders domain-grouped semantic objects from real API shapes',async()=>{
-    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      expect(new Headers(init?.headers).has('X-API-Key')).toBe(false);
       const url=String(input);
       const body=url.endsWith('/model')?model:url.endsWith('/objects')?[object]:url.endsWith('/metrics')?[]:[];
       return {ok:true,status:200,json:async()=>body} as Response;
@@ -48,8 +49,8 @@ describe('object builder',()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
       const body=url.endsWith('/model')?governedModel
-        :url.endsWith('/objects/orders/source')?source
-        :url.endsWith('/objects/orders')?object
+        :url.endsWith('/objects/retail.orders/source')?source
+        :url.endsWith('/objects/retail.orders')?object
         :url.endsWith('/objects')?[object]
         :url.endsWith('/metrics')?[]
         :[];
@@ -57,7 +58,7 @@ describe('object builder',()=>{
     }));
 
     render(
-      <MemoryRouter initialEntries={['/objects/orders/edit']}>
+      <MemoryRouter initialEntries={['/objects/retail.orders/edit']}>
         <App/>
       </MemoryRouter>
     );
@@ -104,7 +105,7 @@ describe('metric builder',()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
       const body=url.endsWith('/model')?model
-        :url.endsWith('/objects/orders')?object
+        :url.endsWith('/objects/retail.orders')?object
         :url.endsWith('/objects')?[object]
         :[];
       return {ok:true,status:200,json:async()=>body} as Response;
@@ -116,32 +117,71 @@ describe('metric builder',()=>{
     const continueButton=screen.getByRole('button',{name:'Continue to metric definition'});
     expect(continueButton).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText('Base object'),{target:{value:'orders'}});
+    fireEvent.change(screen.getByLabelText('Base object'),{target:{value:'retail.orders'}});
     expect(continueButton).toBeEnabled();
     expect(screen.getByText('retail.orders')).toBeInTheDocument();
     fireEvent.click(continueButton);
 
     expect(await screen.findByText('Generated metric YAML')).toBeInTheDocument();
-    expect(screen.getByText(/baseObject: orders/)).toBeInTheDocument();
+    expect(screen.getByText(/baseObject: retail.orders/)).toBeInTheDocument();
   });
 
   it('renders generated YAML beside the visual metric form',async()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
       const body=url.endsWith('/model')?model
-        :url.endsWith('/objects/orders')?object
+        :url.endsWith('/objects/retail.orders')?object
         :[];
       return {ok:true,status:200,json:async()=>body} as Response;
     }));
 
     render(
-      <MemoryRouter initialEntries={['/objects/orders/metrics/new']}>
+      <MemoryRouter initialEntries={['/objects/retail.orders/metrics/new']}>
         <App/>
       </MemoryRouter>
     );
 
     expect(await screen.findByText('Generated metric YAML')).toBeInTheDocument();
     expect(screen.getByText(/kind: metric/)).toBeInTheDocument();
-    expect(screen.getByText(/baseObject: orders/)).toBeInTheDocument();
+    expect(screen.getByText(/baseObject: retail.orders/)).toBeInTheDocument();
+  });
+});
+
+describe('governance redaction',()=>{
+  afterEach(()=>vi.restoreAllMocks());
+
+  it('shows clear policy states for hidden physical lineage and YAML',async()=>{
+    const redactedObject={...object,spec:{...object.spec,source:{}}};
+    const redactedSource={file:'objects/orders.yaml',fields:[{dimension:'order_id',expression:'order_id'}]};
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      const body=url.endsWith('/objects/retail.orders/source')?redactedSource
+        :url.endsWith('/objects/retail.orders')?redactedObject
+        :url.endsWith('/metrics')?[]
+        :[];
+      return {ok:true,status:200,json:async()=>body} as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/objects/retail.orders']}><App/></MemoryRouter>);
+
+    expect(await screen.findByText('Physical lineage hidden by policy.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'yaml'}));
+    expect(screen.getByText('Raw model YAML hidden by policy.')).toBeInTheDocument();
+  });
+
+  it('shows a policy state when compiled SQL is omitted',async()=>{
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+      const url=String(input);
+      const body=url.endsWith('/objects')?[object]
+        :url.endsWith('/metrics')?[]
+        :url.endsWith('/query')?{columns:[],rows:[],rowCount:0,elapsedMs:1,queryId:'query-1'}
+        :[];
+      return {ok:true,status:200,json:async()=>body} as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/query']}><App/></MemoryRouter>);
+    fireEvent.click((await screen.findByText('Run query')).closest('button')!);
+
+    expect(await screen.findByText('Compiled Trino SQL hidden by policy.')).toBeInTheDocument();
   });
 });

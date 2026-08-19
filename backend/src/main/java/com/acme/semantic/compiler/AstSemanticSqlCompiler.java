@@ -20,12 +20,16 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   private static final SourceSelectPolicy SOURCE_SELECTS = new SourceSelectPolicy();
   private static final Set<String> AGGREGATE_FUNCTIONS =
       Set.of("sum", "count", "min", "max", "avg");
+  private static final Set<String> INTEGRAL_TYPES =
+      Set.of("bigint", "integer", "int", "smallint");
   private static final Set<String> FUNCTIONS =
       Set.of(
           "lower",
           "upper",
           "coalesce",
           "date_trunc",
+          "at_timezone",
+          "with_timezone",
           "cast",
           "substring",
           "starts_with",
@@ -71,6 +75,10 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     StringBuilder out = new StringBuilder("SELECT ");
     if (plain.getDistinct() != null) out.append("DISTINCT ");
     List<CompiledQuery.Column> columns = new ArrayList<>();
+    Set<String> outputNames = new HashSet<>();
+    for (SelectItem<?> item : plain.getSelectItems())
+      if (item.getAlias() != null)
+        outputNames.add(unquote(item.getAlias().getName()).toLowerCase(Locale.ROOT));
     boolean firstProjection = true;
     for (int i = 0; i < plain.getSelectItems().size(); i++) {
       SelectItem<?> item = plain.getSelectItems().get(i);
@@ -94,12 +102,15 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
         for (var dimension : object.spec().dimensions()) {
           if (!firstProjection) out.append(", ");
           firstProjection = false;
+          String outputName = uniqueOutputName(dimension.name(), outputNames);
           out.append(
               expressionSql(
                   dimension.sql(),
                   expansionAlias,
-                  ModelExpressionPolicy.ExpressionKind.DIMENSION));
-          columns.add(new CompiledQuery.Column(dimension.name(), dimension.type()));
+                  ModelExpressionPolicy.ExpressionKind.DIMENSION))
+              .append(" AS ")
+              .append(q(outputName));
+          columns.add(new CompiledQuery.Column(outputName, dimension.type()));
         }
         continue;
       }
@@ -107,11 +118,14 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
       firstProjection = false;
       String expression = expression(item.getExpression(), context, Usage.SELECT);
       out.append(expression);
-      String alias =
-          item.getAlias() == null
-              ? outputName(item.getExpression())
-              : unquote(item.getAlias().getName());
-      if (item.getAlias() != null) out.append(" AS ").append(q(alias));
+      String alias;
+      if (item.getAlias() == null) {
+        alias = uniqueOutputName(outputName(item.getExpression()), outputNames);
+      } else {
+        alias = unquote(item.getAlias().getName());
+        outputNames.add(alias.toLowerCase(Locale.ROOT));
+      }
+      out.append(" AS ").append(q(alias));
       columns.add(new CompiledQuery.Column(alias, typeOf(item.getExpression(), context)));
     }
     out.append(" FROM ").append(physical(baseTable, context));
@@ -165,10 +179,16 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
       }
       out.append(" OFFSET ").append(offsetValue.getValue());
     }
-    long requested =
-        plain.getLimit() != null && plain.getLimit().getRowCount() instanceof LongValue l
-            ? l.getValue()
-            : 10_000;
+    long requested = 10_000;
+    if (plain.getLimit() != null) {
+      if (!(plain.getLimit().getRowCount() instanceof LongValue)) {
+        fail("2201W", "LIMIT must be a literal between 0 and 10000");
+      }
+      LongValue limitValue = (LongValue) plain.getLimit().getRowCount();
+      if (limitValue.getValue() < 0)
+        fail("2201W", "LIMIT must be a literal between 0 and 10000");
+      requested = limitValue.getValue();
+    }
     out.append(" LIMIT ").append(Math.min(requested, 10_000));
     validateFanout(context);
     return new CompiledQuery(
@@ -229,16 +249,18 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     if (!FUNCTIONS.contains(name)) fail("0A000", "Function is not allowed: " + name);
     List<? extends Expression> args =
         f.getParameters() == null ? List.of() : f.getParameters().getExpressions();
+    boolean allColumns =
+        f.isAllColumns() || (args.size() == 1 && args.getFirst() instanceof AllColumns);
     if (args.size() == 1 && args.getFirst() instanceof Column col) {
       Resolved resolved = c.resolve(col);
       if (resolved.metric != null && AGGREGATE_FUNCTIONS.contains(name))
         return metric(resolved.metric, resolved.alias, c);
     }
     if (AGGREGATE_FUNCTIONS.contains(name)) {
-      if (f.isAllColumns()) c.measureAliases.add(c.baseAlias);
+      if (allColumns) c.measureAliases.add(c.baseAlias);
       else for (Expression argument : args) collectMeasureAliases(argument, c);
     }
-    if (name.equals("count") && f.isAllColumns()) return "COUNT(*)";
+    if (name.equals("count") && allColumns) return "COUNT(*)";
     return name.toUpperCase(Locale.ROOT)
         + "("
         + (f.isDistinct() ? "DISTINCT " : "")
@@ -260,6 +282,7 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
   private String metric(SemanticModel.Metric metric, String alias, Context c) {
     c.measureAliases.add(alias);
     var spec = metric.spec();
+    if (spec.aggregation() == null) fail("XX000", "Metric aggregation is required");
     SemanticModel.SemanticObject baseObject = c.objects.get(alias);
     String value =
         spec.aggregation() == SemanticModel.Aggregation.custom
@@ -287,6 +310,7 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     if (spec.filters().isEmpty()) return aggregate;
     List<String> filters = new ArrayList<>();
     for (var f : spec.filters()) {
+      if (f.operator() == null) fail("XX000", "Metric filter operator is required");
       String field =
           expressionSql(
               c.objects.get(alias).dimension(f.field()).orElseThrow().sql(),
@@ -330,14 +354,14 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
         left.spec().relationships().stream()
             .filter(
                 r ->
-                    r.targetObject().equals(right.metadata().name())
+                    c.references(r.targetObject(), left, right)
                         && onMatches(r.sourceFields(), r.targetFields(), leftAlias, rightAlias, ons))
             .findFirst();
     Optional<SemanticModel.Relationship> fromRight =
         right.spec().relationships().stream()
             .filter(
                 r ->
-                    r.targetObject().equals(left.metadata().name())
+                    c.references(r.targetObject(), right, left)
                         && onMatches(r.sourceFields(), r.targetFields(), rightAlias, leftAlias, ons))
             .findFirst();
     if (fromLeft.isEmpty() && fromRight.isEmpty()) {
@@ -500,6 +524,24 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
       Resolved r = c.resolve(col);
       return r.metric != null ? r.metric.spec().resultType() : r.dimension.type();
     }
+    if (e instanceof Parenthesis parenthesis) return typeOf(parenthesis.getExpression(), c);
+    if (e instanceof CastExpression cast)
+      return cast.getColDataType() == null
+          ? typeOf(cast.getLeftExpression(), c)
+          : cast.getColDataType().toString().toLowerCase(Locale.ROOT);
+    if (e instanceof Function function) {
+      String name = function.getName().toLowerCase(Locale.ROOT);
+      if (name.equals("count")) return "bigint";
+      if (Set.of("sum", "min", "max", "avg").contains(name)
+          && function.getParameters() != null
+          && function.getParameters().getExpressions().size() == 1) {
+        String argumentType = typeOf(function.getParameters().getExpressions().getFirst(), c);
+        if (name.equals("avg")
+            && INTEGRAL_TYPES.contains(
+                argumentType.toLowerCase(Locale.ROOT).replaceAll("\\(.*", ""))) return "double";
+        return argumentType;
+      }
+    }
     return "varchar";
   }
 
@@ -507,6 +549,13 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     if (e instanceof Column c) return unquote(c.getColumnName());
     if (e instanceof Function f) return f.getName().toLowerCase(Locale.ROOT);
     return "expression";
+  }
+
+  private String uniqueOutputName(String base, Set<String> used) {
+    String candidate = base;
+    int suffix = 2;
+    while (!used.add(candidate.toLowerCase(Locale.ROOT))) candidate = base + "_" + suffix++;
+    return candidate;
   }
 
   private String literal(Object v) {
@@ -572,7 +621,15 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
 
     void add(Table table) {
       String schema = unquote(table.getSchemaName());
-      var object = model.objects().get(unquote(table.getName()));
+      var resolution = model.resolveObject(unquote(table.getName()), schema);
+      var object = resolution.value();
+      if (resolution.ambiguous())
+        throw new SqlCompilationException(
+            "42702",
+            "Ambiguous semantic object: "
+                + table.getName()
+                + "; candidates: "
+                + String.join(", ", resolution.candidates()));
       if (object == null)
         throw new SqlCompilationException("42P01", "Unknown semantic object: " + table.getName());
       String domain = model.domain(object);
@@ -581,6 +638,8 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
         throw new SqlCompilationException(
             "42P01", "Object " + object.metadata().name() + " belongs to domain schema " + domain);
       String objectAlias = alias(table);
+      if (objects.containsKey(objectAlias))
+        throw new SqlCompilationException("42712", "Duplicate table alias: " + objectAlias);
       if (baseAlias == null) baseAlias = objectAlias;
       objects.put(objectAlias, object);
     }
@@ -598,17 +657,23 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
       for (var e : scope) {
         var d = e.getValue().dimension(name);
         if (d.isPresent()) found.add(new Resolved(e.getKey(), d.get(), null));
-        var m = model.metrics().get(name);
-        if (m != null
-            && m.spec().baseObject().equals(e.getValue().metadata().name())
-            && model.domain(m).equals(model.domain(e.getValue())))
-          found.add(new Resolved(e.getKey(), null, m));
+        for (var m : model.metrics().values())
+          if (m.metadata().name().equals(name)
+              && model.resolveObject(m.spec().baseObject(), model.domain(m)).value()
+                  == e.getValue()) found.add(new Resolved(e.getKey(), null, m));
       }
       if (found.isEmpty())
         throw new SqlCompilationException("42703", "Unknown semantic field: " + name);
       if (found.size() > 1)
         throw new SqlCompilationException("42702", "Ambiguous semantic field: " + name);
       return found.getFirst();
+    }
+
+    boolean references(
+        String reference,
+        SemanticModel.SemanticObject source,
+        SemanticModel.SemanticObject target) {
+      return model.resolveObject(reference, model.domain(source)).value() == target;
     }
   }
 

@@ -40,7 +40,8 @@ class MetricCrudServiceTest {
             "Gross revenue",
             "All order revenue",
             "finance",
-            List.of("finance"));
+            List.of("finance"),
+            List.of("bookings", "gmv"));
     var spec =
         new SemanticModel.MetricSpec(
             "orders",
@@ -50,8 +51,10 @@ class MetricCrudServiceTest {
             "currency",
             List.of());
 
-    assertThat(service.create(new MetricCrudService.MetricInput(metadata, spec)).file())
-        .isEqualTo("domains/retail/metrics/gross_revenue.yaml");
+    SemanticModel.Metric created =
+        service.create(new MetricCrudService.MetricInput(metadata, spec));
+    assertThat(created.file()).isEqualTo("domains/retail/metrics/gross_revenue.yaml");
+    assertThat(created.metadata().aliases()).containsExactly("bookings", "gmv");
     assertThat(Files.exists(temporaryModel.resolve("domains/retail/metrics/gross_revenue.yaml")))
         .isTrue();
     var updated =

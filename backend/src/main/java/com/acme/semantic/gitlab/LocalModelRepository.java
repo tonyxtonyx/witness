@@ -8,7 +8,9 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 
 @Component
 @ConditionalOnProperty(
@@ -47,23 +49,10 @@ public class LocalModelRepository implements ModelRepository, MutableModelReposi
 
   @Override
   public ChangeResult createMergeRequest(ChangeSet changeSet) {
-    String id = UUID.randomUUID().toString().substring(0, 8);
-    String slug =
-        changeSet
-            .title()
-            .toLowerCase(Locale.ROOT)
-            .replaceAll("[^a-z0-9]+", "-")
-            .replaceAll("(^-|-$)", "");
-    String branch =
-        "semantic/change/"
-            + (slug.isBlank() ? "model" : slug.substring(0, Math.min(slug.length(), 36)))
-            + "-"
-            + id;
-    Map<String, String> commitFiles = new TreeMap<>(changeSet.files());
-    changeSet.deletions().forEach(path -> commitFiles.put(path, "<deleted>"));
-    String commit = sha(commitFiles);
-    return new ChangeResult(
-        branch, commit, new ChangeResult.MergeRequest(0, "mock://gitlab/merge_requests/" + id));
+    throw new ResponseStatusException(
+        HttpStatus.NOT_IMPLEMENTED,
+        "Merge-request submission requires GitLab mode; use the direct object and metric CRUD"
+            + " endpoints in local mode instead");
   }
 
   @Override

@@ -211,6 +211,10 @@ curl --request POST http://localhost:8080/api/v1/query \
   }'
 ```
 
+Canonical semantic queries accept an IANA timezone for time bucketing. Schema v1 assumes
+`timestamp` dimensions are stored in UTC; non-UTC queries convert those values to the requested
+zone before `DATE_TRUNC`, while `date` dimensions are bucketed without timezone conversion.
+
 ## Semantic model
 
 The model is stored under [`semantic-model/`](semantic-model):
@@ -337,6 +341,12 @@ Witness validates this source as one read-only SELECT and compiles semantic quer
 and set operations fail closed. Dimensions and metrics reference the columns projected
 by the SELECT, so the object remains available through REST, JDBC, DBeaver, and the
 regular semantic SQL compiler.
+
+A derived source is nevertheless **trusted SQL**, not a whitelist-rendered expression. The
+controls above are parse-level restrictions; they do not limit which fully qualified catalogs the
+configured Trino identity can read. In GitLab mode, merge-request review is the authorization step
+for accepting that SQL. Local mode writes validated CRUD changes directly and has no review step,
+so access to local object CRUD must be limited to trusted model authors.
 
 ### Metric example
 
@@ -617,7 +627,7 @@ A revision is activated only when the complete model passes validation, includin
 - Metric base objects, filters, formats, and result types
 - Metric/dimension name collisions
 - Fail-closed model-expression AST policy
-- Fail-closed derived-source SELECT policy with fully qualified physical tables
+- Parse-restricted trusted derived-source SQL with fully qualified physical tables and Git review
 - Metric fields resolved through registered dimensions
 - MCP canonical query types, unique relationship paths, and bounded result plans
 
@@ -629,11 +639,11 @@ This repository is a working vertical MVP, not a production-ready database serve
 
 - REST authentication uses one development API key; production OIDC, RBAC, and attributable audit events are not implemented yet.
 - MCP has per-tool audit events, but uses the same single API-key principal until production OIDC/RBAC is introduced.
-- YAML schema v1 does not model row/column policies, freshness SLAs, currency conversion, or source timezones; the default MCP policy does not invent them, while Semantic Core exposes typed production policy hooks.
+- YAML schema v1 does not model row/column policies, freshness SLAs, currency conversion, or source timezones; timestamp sources are assumed to be UTC, while Semantic Core exposes typed production policy hooks.
 - The UI's current “verified” badge is inferred from owner and description; it is not a persisted certification workflow.
 - pgwire uses cleartext password authentication and no TLS; keep it local or behind trusted TLS termination.
 - PostgreSQL protocol coverage is intentionally narrow: no COPY, cursors, LISTEN/NOTIFY, cancel requests, or arbitrary system catalogs.
-- Canonical MCP queries support unique multi-hop relationship paths and reject fan-out; full symmetric aggregation remains roadmap work.
+- Canonical MCP queries support explicit multi-hop relationship selection and reject fan-out; full symmetric aggregation remains roadmap work.
 - GitLab is mocked in automated tests; a real GitLab API is used only when governed mode is configured.
 - The demo PostgreSQL container has no persistent data volume and is recreated from `init.sql`.
 

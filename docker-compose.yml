@@ -18,7 +18,10 @@ services:
       MODEL_PATH: /app/semantic-model
       TRINO_JDBC_URL: jdbc:trino://trino:8080/postgres/public
       TRINO_USERNAME: semantic
-      REST_API_KEY: dev-secret
+      REST_API_KEY: ${REST_API_KEY:-dev-secret}
+      ALLOW_INSECURE_API_KEY: "true"
+      MCP_EXPOSE_COMPILED_SQL: "true"
+      MCP_EXPOSE_PHYSICAL_LINEAGE: "true"
       PGWIRE_USERNAME: semantic
       PGWIRE_PASSWORD: semantic
       GITLAB_ENABLED: "false"
@@ -27,5 +30,7 @@ services:
     healthcheck: {test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness >/dev/null"], interval: 5s, timeout: 3s, retries: 30}
   frontend:
     build: ./frontend
+    environment:
+      REST_API_KEY: ${REST_API_KEY:-dev-secret}
     ports: ["3000:80"]
     depends_on: {backend: {condition: service_healthy}}

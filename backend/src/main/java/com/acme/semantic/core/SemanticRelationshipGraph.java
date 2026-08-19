@@ -5,15 +5,16 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 /** Deterministic relationship graph used by context, planning, and lineage. */
 public final class SemanticRelationshipGraph {
+  private static final int MAX_EXPANDED_STATES = 10_000;
+  private static final int MAX_CANDIDATE_PATHS = 5;
   private final SemanticModel model;
   private final Map<String, List<Edge>> adjacency;
 
@@ -23,35 +24,55 @@ public final class SemanticRelationshipGraph {
   }
 
   public PathResult uniqueShortestPath(String from, String to) {
-    if (from.equals(to)) return new PathResult(List.of(), false);
-    record State(String node, List<Edge> edges, Set<String> visited) {}
-    ArrayDeque<State> queue = new ArrayDeque<>();
-    queue.add(new State(from, List.of(), Set.of(from)));
-    List<List<Edge>> matches = new ArrayList<>();
-    int shortest = Integer.MAX_VALUE;
+    if (from.equals(to)) return new PathResult(List.of(), false, List.of(List.of()));
+    ArrayDeque<String> queue = new ArrayDeque<>();
+    Map<String, Integer> distances = new HashMap<>();
+    Map<String, List<List<Edge>>> paths = new HashMap<>();
+    queue.add(from);
+    distances.put(from, 0);
+    paths.put(from, List.of(List.of()));
+    Integer shortest = null;
+    int expanded = 0;
     while (!queue.isEmpty()) {
-      State state = queue.removeFirst();
-      if (state.edges().size() >= shortest) continue;
-      for (Edge edge : adjacency.getOrDefault(state.node(), List.of())) {
-        String next = edge.other(state.node());
-        if (state.visited().contains(next)) continue;
-        List<Edge> path = new ArrayList<>(state.edges());
-        path.add(edge);
-        if (next.equals(to)) {
-          shortest = path.size();
-          matches.add(List.copyOf(path));
-          continue;
+      String current = queue.removeFirst();
+      int distance = distances.get(current);
+      if (shortest != null && distance >= shortest) break;
+      for (Edge edge : adjacency.getOrDefault(current, List.of())) {
+        if (++expanded > MAX_EXPANDED_STATES)
+          throw new SemanticException(
+              SemanticErrorCode.QUERY_LIMIT_EXCEEDED,
+              "Relationship path search exceeded "
+                  + MAX_EXPANDED_STATES
+                  + " expanded states");
+        String next = edge.other(current);
+        int nextDistance = distance + 1;
+        Integer knownDistance = distances.get(next);
+        if (knownDistance != null && knownDistance < nextDistance) continue;
+        List<List<Edge>> candidates = new ArrayList<>();
+        for (List<Edge> currentPath : paths.get(current)) {
+          List<Edge> path = new ArrayList<>(currentPath);
+          path.add(edge);
+          candidates.add(List.copyOf(path));
         }
-        Set<String> visited = new HashSet<>(state.visited());
-        visited.add(next);
-        queue.addLast(new State(next, List.copyOf(path), Set.copyOf(visited)));
+        if (knownDistance == null) {
+          distances.put(next, nextDistance);
+          paths.put(next, limitedDistinct(candidates));
+          queue.addLast(next);
+          if (next.equals(to)) shortest = nextDistance;
+        } else {
+          List<List<Edge>> combined = new ArrayList<>(paths.get(next));
+          combined.addAll(candidates);
+          paths.put(next, limitedDistinct(combined));
+        }
       }
     }
-    int shortestLength = shortest;
-    matches.removeIf(path -> path.size() != shortestLength);
-    if (matches.isEmpty()) return new PathResult(null, false);
-    matches.sort(Comparator.comparing(this::pathKey));
-    return new PathResult(matches.getFirst(), matches.size() > 1);
+    if (!paths.containsKey(to)) return new PathResult(null, false, List.of());
+    List<List<Edge>> candidates = paths.get(to);
+    return new PathResult(candidates.getFirst(), candidates.size() > 1, candidates);
+  }
+
+  public List<Edge> edgesFrom(String object) {
+    return adjacency.getOrDefault(object, List.of());
   }
 
   public boolean fanoutSafe(String metricObject, List<Edge> path) {
@@ -85,9 +106,11 @@ public final class SemanticRelationshipGraph {
     Map<String, List<Edge>> out = new LinkedHashMap<>();
     for (SemanticModel.SemanticObject source : model.objects().values()) {
       for (SemanticModel.Relationship relationship : source.spec().relationships()) {
-        if (!model.objects().containsKey(relationship.targetObject())) continue;
+        SemanticModel.SemanticObject target =
+            model.resolveObject(relationship.targetObject(), model.domain(source)).value();
+        if (target == null) continue;
         Edge edge =
-            new Edge(source.metadata().name(), relationship.targetObject(), relationship);
+            new Edge(model.objectId(source), model.objectId(target), relationship);
         out.computeIfAbsent(edge.sourceObject(), ignored -> new ArrayList<>()).add(edge);
         out.computeIfAbsent(edge.targetObject(), ignored -> new ArrayList<>()).add(edge);
       }
@@ -105,9 +128,61 @@ public final class SemanticRelationshipGraph {
     return path.stream().map(Edge::id).reduce((left, right) -> left + ">" + right).orElse("");
   }
 
-  public record PathResult(List<Edge> edges, boolean ambiguous) {
+  private List<List<Edge>> limitedDistinct(List<List<Edge>> paths) {
+    Map<String, List<Edge>> distinct = new LinkedHashMap<>();
+    paths.stream()
+        .sorted(Comparator.comparing(this::pathKey))
+        .forEach(path -> distinct.putIfAbsent(pathKey(path), path));
+    return distinct.values().stream().limit(MAX_CANDIDATE_PATHS).toList();
+  }
+
+  public static final class PathResult {
+    private final List<Edge> edges;
+    private final boolean ambiguous;
+    private final List<List<Edge>> candidatePaths;
+
+    public PathResult(List<Edge> edges, boolean ambiguous) {
+      this(edges, ambiguous, edges == null ? List.of() : List.of(edges));
+    }
+
+    private PathResult(
+        List<Edge> edges, boolean ambiguous, List<List<Edge>> candidatePaths) {
+      this.edges = edges;
+      this.ambiguous = ambiguous;
+      this.candidatePaths = List.copyOf(candidatePaths);
+    }
+
+    public List<Edge> edges() {
+      return edges;
+    }
+
+    public boolean ambiguous() {
+      return ambiguous;
+    }
+
     public Optional<List<Edge>> path() {
       return Optional.ofNullable(edges);
+    }
+
+    public List<List<Edge>> candidatePaths() {
+      return candidatePaths;
+    }
+
+    @Override
+    public boolean equals(Object value) {
+      if (this == value) return true;
+      if (!(value instanceof PathResult other)) return false;
+      return ambiguous == other.ambiguous && Objects.equals(edges, other.edges);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(edges, ambiguous);
+    }
+
+    @Override
+    public String toString() {
+      return "PathResult[edges=" + edges + ", ambiguous=" + ambiguous + "]";
     }
   }
 

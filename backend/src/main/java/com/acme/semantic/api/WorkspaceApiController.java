@@ -3,9 +3,12 @@ package com.acme.semantic.api;
 import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.compiler.*;
 import com.acme.semantic.config.SemanticProperties;
+import com.acme.semantic.core.SemanticAccessPolicy;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.execution.*;
 import com.acme.semantic.gitlab.*;
 import com.acme.semantic.model.SemanticModel;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,23 +24,23 @@ public class WorkspaceApiController {
   private final SemanticCatalog catalog;
   private final SemanticSqlCompiler compiler;
   private final QueryExecutor executor;
-  private final ModelRepository repository;
   private final ChangeService changes;
   private final SemanticProperties properties;
+  private final SemanticAccessPolicy policy;
 
   public WorkspaceApiController(
       SemanticCatalog catalog,
       SemanticSqlCompiler compiler,
       QueryExecutor executor,
-      ModelRepository repository,
       ChangeService changes,
-      SemanticProperties properties) {
+      SemanticProperties properties,
+      SemanticAccessPolicy policy) {
     this.catalog = catalog;
     this.compiler = compiler;
     this.executor = executor;
-    this.repository = repository;
     this.changes = changes;
     this.properties = properties;
+    this.policy = policy;
   }
 
   @GetMapping("/model")
@@ -69,23 +72,25 @@ public class WorkspaceApiController {
   }
 
   @GetMapping("/objects/{name}/source")
-  public ObjectSource source(@PathVariable String name) {
-    SemanticModel.SemanticObject object =
-        Optional.ofNullable(catalog.model().objects().get(name))
-            .orElseThrow(() -> new IllegalArgumentException("Unknown object: " + name));
-    String yaml = repository.loadDefaultRevision().files().get(object.file());
+  public ObjectSource source(@PathVariable String name, HttpServletRequest request) {
+    SemanticModel.SemanticObject object = ApiModelResolver.object(catalog.model(), name);
+    boolean physical = canViewPhysical(request);
+    String yaml = physical ? catalog.source(object.file()) : null;
     var source = object.spec().source();
     return new ObjectSource(
         object.file(),
         yaml,
-        source.derived()
-            ? "Derived SELECT (governed SQL)"
-            : source.catalog() + "." + source.schema() + "." + source.table(),
+        physical
+            ? source.derived()
+                ? "Derived SELECT (trusted SQL)"
+                : source.catalog() + "." + source.schema() + "." + source.table()
+            : null,
         object.spec().dimensions().stream().map(d -> new LineageField(d.name(), d.sql())).toList());
   }
 
   @PostMapping("/query")
-  public ResponseEntity<?> query(@RequestBody QueryRequest request) {
+  public ResponseEntity<?> query(
+      @RequestBody QueryRequest request, HttpServletRequest httpRequest) {
     long started = System.nanoTime();
     try {
       CompiledQuery compiled = compiler.compile(request.sql(), catalog.model());
@@ -107,7 +112,7 @@ public class WorkspaceApiController {
               result.rows(),
               result.rows().size(),
               elapsed,
-              compiled.trinoSql(),
+              canViewCompiledSql(httpRequest) ? compiled.trinoSql() : null,
               result.queryId()));
     } catch (SqlCompilationException e) {
       String hint =
@@ -132,8 +137,18 @@ public class WorkspaceApiController {
     List<FieldIssue> issues = new ArrayList<>();
     if (request.expression() == null || request.expression().isBlank())
       issues.add(new FieldIssue("expression", "REQUIRED", "Expression is required", "ERROR"));
-    SemanticModel.SemanticObject object = catalog.model().objects().get(request.objectId());
-    if (object == null)
+    SemanticModel.Resolution<SemanticModel.SemanticObject> resolution =
+        catalog.model().resolveObject(request.objectId());
+    SemanticModel.SemanticObject object = resolution.value();
+    if (resolution.ambiguous())
+      issues.add(
+          new FieldIssue(
+              "objectId",
+              "AMBIGUOUS_OBJECT",
+              "Base object is ambiguous; candidates: "
+                  + String.join(", ", resolution.candidates()),
+              "ERROR"));
+    else if (object == null)
       issues.add(
           new FieldIssue("objectId", "UNKNOWN_OBJECT", "Base object does not exist", "ERROR"));
     if (issues.isEmpty())
@@ -173,7 +188,7 @@ public class WorkspaceApiController {
                   object.metadata().name(),
                   object.metadata().label(),
                   objectDomain,
-                  "/objects/" + object.metadata().name(),
+                  "/objects/" + model.objectId(object),
                   verified,
                   object.metadata().owner(),
                   object.metadata().description()));
@@ -204,7 +219,7 @@ public class WorkspaceApiController {
                     dimension.name(),
                     dimension.label(),
                     objectDomain,
-                    "/objects/" + object.metadata().name() + "?tab=dimensions",
+                    "/objects/" + model.objectId(object) + "?tab=dimensions",
                     verified,
                     object.metadata().owner(),
                     dimension.description()));
@@ -214,6 +229,8 @@ public class WorkspaceApiController {
       for (var metric : model.metrics().values()) {
         boolean verified = verified(metric.metadata());
         String metricDomain = model.domain(metric);
+        SemanticModel.SemanticObject base =
+            model.resolveObject(metric.spec().baseObject(), metricDomain).value();
         if ((domain == null || domain.equals(metricDomain))
             && (!verifiedOnly || verified)
             && matches(metric.metadata(), needle))
@@ -223,7 +240,10 @@ public class WorkspaceApiController {
                   metric.metadata().name(),
                   metric.metadata().label(),
                   metricDomain,
-                  "/objects/" + metric.spec().baseObject() + "/metrics/" + metric.metadata().name(),
+                  "/objects/"
+                      + model.objectId(base)
+                      + "/metrics/"
+                      + model.metricId(metric),
                   verified,
                   metric.metadata().owner(),
                   metric.metadata().description()));
@@ -254,6 +274,16 @@ public class WorkspaceApiController {
         && !metadata.description().isBlank()
         && metadata.owner() != null
         && !metadata.owner().isBlank();
+  }
+
+  private boolean canViewCompiledSql(HttpServletRequest request) {
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
+    return policy.canViewCompiledSql(principal);
+  }
+
+  private boolean canViewPhysical(HttpServletRequest request) {
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
+    return policy.canViewPhysicalLineage(principal);
   }
 
   private String humanize(String value) {

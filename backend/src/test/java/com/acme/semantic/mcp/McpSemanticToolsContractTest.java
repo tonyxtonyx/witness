@@ -9,6 +9,7 @@ import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.config.SemanticProperties;
 import com.acme.semantic.core.SemanticLineageService;
 import com.acme.semantic.core.SemanticMetadataService;
+import com.acme.semantic.core.SemanticQuery;
 import com.acme.semantic.core.SemanticQueryService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.common.McpTransportContext;
@@ -112,6 +113,51 @@ class McpSemanticToolsContractTest {
     assertThat(result.structuredContent())
         .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
         .containsEntry("code", "INVALID_TOOL_ARGUMENTS");
+  }
+
+  @Test
+  void acceptsAndPublishesStrictJoinPathSelection() {
+    SemanticQuery query =
+        McpArguments.query(
+            Map.of(
+                "metrics", List.of("retail.total_revenue"),
+                "joinPaths",
+                    List.of(
+                        Map.of(
+                            "to", "retail.customers",
+                            "via", List.of("order_customer")))),
+            "$.query");
+
+    assertThat(query.joinPaths())
+        .containsExactly(
+            new SemanticQuery.JoinPath("retail.customers", List.of("order_customer")));
+    assertThat(tools)
+        .filteredOn(
+            specification ->
+                specification.tool().name().equals("compile_semantic_query")
+                    || specification.tool().name().equals("query_metrics"))
+        .allSatisfy(
+            specification -> {
+              Map<String, Object> root = specification.tool().inputSchema();
+              Map<?, ?> queryProperty =
+                  (Map<?, ?>) ((Map<?, ?>) root.get("properties")).get("query");
+              assertThat(
+                      ((Map<?, ?>) queryProperty.get("properties"))
+                          .containsKey("joinPaths"))
+                  .isTrue();
+            });
+    McpStatelessServerFeatures.SyncToolSpecification compile =
+        tools.stream()
+            .filter(specification -> specification.tool().name().equals("compile_semantic_query"))
+            .findFirst()
+            .orElseThrow();
+    Map<?, ?> errors =
+        (Map<?, ?>)
+            ((Map<?, ?>) compile.tool().outputSchema().get("properties")).get("errors");
+    Map<?, ?> issue = (Map<?, ?>) errors.get("items");
+    Map<?, ?> issueProperties = (Map<?, ?>) issue.get("properties");
+    assertThat(issueProperties.containsKey("details")).isTrue();
+    assertThat(issueProperties.containsKey("suggestions")).isTrue();
   }
 
   private McpSchema.CallToolResult call(String name, Map<String, Object> arguments) {

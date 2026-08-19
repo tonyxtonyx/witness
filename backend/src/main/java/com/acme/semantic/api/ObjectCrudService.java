@@ -41,24 +41,25 @@ public class ObjectCrudService {
   public synchronized SemanticModel.SemanticObject update(String name, ObjectInput input) {
     SemanticModel.SemanticObject existing = require(name);
     SemanticModel.SemanticObject object = normalize(input);
-    if (!name.equals(object.metadata().name())) {
+    if (!existing.metadata().name().equals(object.metadata().name())) {
       throw new IllegalArgumentException("Object name in the path and body must match");
     }
     String path = path(object);
     Set<String> deletions = path.equals(existing.file()) ? Set.of() : Set.of(existing.file());
     validateAndApply(Map.of(path, serialize(object)), deletions);
-    return catalog.model().objects().get(name);
+    return catalog.model().objectById(catalog.model().objectId(object)).orElseThrow();
   }
 
   public synchronized SemanticModel.SemanticObject create(ObjectInput input) {
     SemanticModel.SemanticObject object = normalize(input);
-    if (catalog.model().objects().containsKey(object.metadata().name())) {
+    String id = catalog.model().objectId(object);
+    if (catalog.model().objects().containsKey(id)) {
       throw new ResponseStatusException(
-          HttpStatus.CONFLICT, "Object already exists: " + object.metadata().name());
+          HttpStatus.CONFLICT, "Object already exists: " + id);
     }
     String path = path(object);
     validateAndApply(Map.of(path, serialize(object)), Set.of());
-    return catalog.model().objects().get(object.metadata().name());
+    return catalog.model().objectById(id).orElseThrow();
   }
 
   public synchronized void delete(String name) {
@@ -67,18 +68,24 @@ public class ObjectCrudService {
   }
 
   private SemanticModel.SemanticObject require(String name) {
-    SemanticModel.SemanticObject object = catalog.model().objects().get(name);
-    if (object == null) {
-      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown object: " + name);
-    }
-    return object;
+    return ApiModelResolver.object(catalog.model(), name);
   }
 
   private SemanticModel.SemanticObject normalize(ObjectInput input) {
     if (input == null || input.metadata() == null || input.spec() == null) {
       throw new IllegalArgumentException("metadata and spec are required");
     }
-    return new SemanticModel.SemanticObject(1, "object", input.metadata(), input.spec(), null);
+    String domain = catalog.model().domain(input.metadata());
+    SemanticModel.Metadata metadata =
+        new SemanticModel.Metadata(
+            input.metadata().name(),
+            domain,
+            input.metadata().label(),
+            input.metadata().description(),
+            input.metadata().owner(),
+            input.metadata().tags(),
+            input.metadata().aliases());
+    return new SemanticModel.SemanticObject(1, "object", metadata, input.spec(), null);
   }
 
   private String path(SemanticModel.SemanticObject object) {

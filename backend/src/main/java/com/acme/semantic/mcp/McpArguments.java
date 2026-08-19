@@ -132,7 +132,7 @@ final class McpArguments {
     Map<String, Object> input = object(value, path);
     strict(
         input,
-        Set.of("metrics", "dimensions", "filters", "orderBy", "limit", "timezone"),
+        Set.of("metrics", "dimensions", "filters", "orderBy", "limit", "timezone", "joinPaths"),
         path);
     List<String> metrics = strings(input, "metrics", 20, path);
     List<SemanticQuery.DimensionSelection> dimensions = dimensions(input.get("dimensions"), path);
@@ -140,7 +140,26 @@ final class McpArguments {
     List<SemanticQuery.OrderBy> orderBy = orderBy(input.get("orderBy"), path);
     Integer limit = input.containsKey("limit") ? rawInteger(input.get("limit"), path + ".limit") : null;
     String timezone = optionalString(input, "timezone", path);
-    return new SemanticQuery(metrics, dimensions, filters, orderBy, limit, timezone);
+    List<SemanticQuery.JoinPath> joinPaths = joinPaths(input.get("joinPaths"), path);
+    return new SemanticQuery(metrics, dimensions, filters, orderBy, limit, timezone, joinPaths);
+  }
+
+  private static List<SemanticQuery.JoinPath> joinPaths(Object value, String path) {
+    if (value == null) return List.of();
+    if (!(value instanceof List<?> list)) invalid("joinPaths must be an array", path + ".joinPaths");
+    List<?> list = (List<?>) value;
+    if (list.size() > 20) invalid("Too many join paths", path + ".joinPaths");
+    List<SemanticQuery.JoinPath> result = new ArrayList<>();
+    for (int i = 0; i < list.size(); i++) {
+      String itemPath = path + ".joinPaths[" + i + "]";
+      Map<String, Object> item = object(list.get(i), itemPath);
+      strict(item, Set.of("to", "via"), itemPath);
+      String to = requiredString(item, "to", itemPath);
+      List<String> via = strings(item, "via", 20, itemPath);
+      if (via.isEmpty()) invalid("Join path via must not be empty", itemPath + ".via");
+      result.add(new SemanticQuery.JoinPath(to, via));
+    }
+    return List.copyOf(result);
   }
 
   static SemanticQuery.FilterGroup filters(Object value, String path) {

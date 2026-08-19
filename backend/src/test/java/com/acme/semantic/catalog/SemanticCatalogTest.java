@@ -13,17 +13,20 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class SemanticCatalogTest {
   @Test
   void pollingRecoversWhenRemoteRepositoryBecomesAvailableAfterStartup() throws Exception {
     AtomicBoolean available = new AtomicBoolean(false);
+    AtomicInteger loads = new AtomicInteger();
     ModelRevision revision = demoRevision();
     ModelRepository repository =
         new ModelRepository() {
           @Override
           public ModelRevision loadDefaultRevision() {
+            loads.incrementAndGet();
             if (!available.get()) {
               throw new IllegalStateException("GitLab is still starting");
             }
@@ -46,7 +49,10 @@ class SemanticCatalogTest {
 
     assertThat(catalog.status().healthy()).isTrue();
     assertThat(catalog.status().activeRevision()).isEqualTo("git-main-1");
-    assertThat(catalog.model().objects()).containsKeys("orders", "customers");
+    assertThat(catalog.model().objects()).containsKeys("retail.orders", "retail.customers");
+    assertThat(catalog.source("project.yaml")).contains("witness_demo");
+    assertThat(catalog.source("project.yaml")).contains("semanticSchema");
+    assertThat(loads).hasValue(2);
   }
 
   private ModelRevision demoRevision() throws Exception {

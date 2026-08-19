@@ -21,6 +21,11 @@ class SourceSelectPolicyTest {
     assertThat(rendered)
         .contains("postgres.public.orders o")
         .contains("LEFT JOIN postgres.public.customers c");
+    assertThat(
+            policy.referencedTables(
+                "SELECT o.order_id FROM postgres.public.orders o "
+                    + "JOIN postgres.public.customers c ON c.customer_id = o.customer_id"))
+        .containsExactly("postgres.public.customers", "postgres.public.orders");
   }
 
   @Test
@@ -34,5 +39,15 @@ class SourceSelectPolicyTest {
         .hasMessageContaining("Parameters");
     assertThatThrownBy(() -> policy.render("SELECT * FROM orders"))
         .hasMessageContaining("catalog.schema.table");
+  }
+
+  @Test
+  void rejectsSetOperationsWithCompilationErrorInsteadOfClassCastException() {
+    assertThatThrownBy(
+            () ->
+                policy.render(
+                    "SELECT id FROM postgres.public.a UNION SELECT id FROM postgres.public.b"))
+        .isInstanceOf(SqlCompilationException.class)
+        .hasMessage("Set operations are not supported in a derived source");
   }
 }

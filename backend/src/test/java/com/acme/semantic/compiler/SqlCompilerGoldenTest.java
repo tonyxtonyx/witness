@@ -20,8 +20,8 @@ class SqlCompilerGoldenTest {
             TestModels.demo());
     assertThat(q.trinoSql())
         .isEqualTo(
-            "SELECT \"orders\".\"customer_id\", SUM(\"orders\".\"amount\") FILTER (WHERE"
-                + " \"orders\".\"status\" IN ('paid', 'completed')) FROM"
+            "SELECT \"orders\".\"customer_id\" AS \"customer_id\", SUM(\"orders\".\"amount\") FILTER (WHERE"
+                + " \"orders\".\"status\" IN ('paid', 'completed')) AS \"sum\" FROM"
                 + " \"postgres\".\"public\".\"orders\" \"orders\" GROUP BY"
                 + " \"orders\".\"customer_id\" ORDER BY SUM(\"orders\".\"amount\") FILTER (WHERE"
                 + " \"orders\".\"status\" IN ('paid', 'completed')) DESC LIMIT 100");
@@ -59,9 +59,109 @@ class SqlCompilerGoldenTest {
         .containsExactly("order_id", "customer_id", "product_id", "created_at", "amount", "status");
     assertThat(query.trinoSql())
         .startsWith(
-            "SELECT \"orders\".\"order_id\", \"orders\".\"customer_id\","
-                + " \"orders\".\"product_id\"")
+            "SELECT \"orders\".\"order_id\" AS \"order_id\", \"orders\".\"customer_id\" AS"
+                + " \"customer_id\", \"orders\".\"product_id\" AS \"product_id\"")
         .doesNotContain("total_revenue");
+  }
+
+  @Test
+  void rejectsNonLiteralOrNegativeLimitsAndClampsLargeLiteral() {
+    for (String limit : List.of("?", "-5", "5+5")) {
+      assertThatThrownBy(
+              () ->
+                  compiler.compile(
+                      "SELECT status FROM retail.orders LIMIT " + limit, TestModels.demo()))
+          .isInstanceOf(SqlCompilationException.class)
+          .satisfies(
+              error ->
+                  assertThat(((SqlCompilationException) error).sqlState()).isEqualTo("2201W"))
+          .hasMessage("LIMIT must be a literal between 0 and 10000");
+    }
+    assertThat(
+            compiler
+                .compile("SELECT status FROM retail.orders LIMIT 10001", TestModels.demo())
+                .trinoSql())
+        .endsWith("LIMIT 10000");
+  }
+
+  @Test
+  void reportsSemanticTypesForAggregateProjections() {
+    CompiledQuery query =
+        compiler.compile(
+            "SELECT SUM(amount), MIN(amount), MAX(amount), AVG(amount), COUNT(*),"
+                + " COUNT(DISTINCT customer_id), SUM(total_revenue) FROM retail.orders",
+            TestModels.demo());
+
+    assertThat(query.columns())
+        .extracting(CompiledQuery.Column::semanticType)
+        .containsExactly(
+            "decimal(18,2)",
+            "decimal(18,2)",
+            "decimal(18,2)",
+            "decimal(18,2)",
+            "bigint",
+            "bigint",
+            "decimal(18,2)");
+  }
+
+  @Test
+  void reportsDoubleForAverageOfIntegralMember() {
+    CompiledQuery query =
+        compiler.compile(
+            "SELECT AVG(order_id), AVG(amount) FROM retail.orders", TestModels.demo());
+
+    assertThat(query.columns())
+        .extracting(CompiledQuery.Column::semanticType)
+        .containsExactly("double", "decimal(18,2)");
+  }
+
+  @Test
+  void deduplicatesGeneratedProjectionNamesDeterministically() {
+    CompiledQuery query =
+        compiler.compile(
+            "SELECT SUM(amount), SUM(amount), SUM(amount) FROM retail.orders",
+            TestModels.demo());
+
+    assertThat(query.columns())
+        .extracting(CompiledQuery.Column::name)
+        .containsExactly("sum", "sum_2", "sum_3");
+    assertThat(query.trinoSql())
+        .contains("AS \"sum\"")
+        .contains("AS \"sum_2\"")
+        .contains("AS \"sum_3\"");
+    CompiledQuery explicit =
+        compiler.compile(
+            "SELECT SUM(amount), SUM(amount) AS sum FROM retail.orders", TestModels.demo());
+    assertThat(explicit.columns())
+        .extracting(CompiledQuery.Column::name)
+        .containsExactly("sum_2", "sum");
+  }
+
+  @Test
+  void rejectsDuplicateTableAliasesBeforeResolvingFields() {
+    assertThatThrownBy(
+            () ->
+                compiler.compile(
+                    "SELECT status FROM retail.orders o JOIN retail.customers o"
+                        + " ON o.customer_id = o.customer_id",
+                    TestModels.demo()))
+        .isInstanceOf(SqlCompilationException.class)
+        .satisfies(
+            error -> assertThat(((SqlCompilationException) error).sqlState()).isEqualTo("42712"))
+        .hasMessageContaining("Duplicate table alias");
+  }
+
+  @Test
+  void aliasesBareSemanticProjectionsAndWildcardExpansion() {
+    CompiledQuery bare =
+        compiler.compile("SELECT status, total_revenue FROM retail.orders", TestModels.demo());
+    CompiledQuery wildcard =
+        compiler.compile("SELECT * FROM retail.orders LIMIT 1", TestModels.demo());
+
+    assertThat(bare.trinoSql())
+        .contains("\"orders\".\"status\" AS \"status\"")
+        .contains("FILTER (WHERE \"orders\".\"status\" IN ('paid', 'completed')) AS \"total_revenue\"");
+    assertThat(wildcard.trinoSql()).contains("\"orders\".\"order_id\" AS \"order_id\"");
   }
 
   @Test
@@ -119,7 +219,7 @@ class SqlCompilerGoldenTest {
   void compilesDimensionsAndMetricsAgainstDerivedJoinedObject() {
     SemanticModel model = TestModels.demo();
     var objects = new LinkedHashMap<>(model.objects());
-    var orders = objects.get("orders");
+    var orders = objects.get("retail.orders");
     var derivedSource =
         new SemanticModel.Source(
             null,
@@ -144,7 +244,7 @@ class SqlCompilerGoldenTest {
             orders.spec().dimensions(),
             orders.spec().relationships());
     objects.put(
-        "orders",
+        "retail.orders",
         new SemanticModel.SemanticObject(
             orders.version(),
             orders.kind(),

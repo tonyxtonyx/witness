@@ -132,6 +132,69 @@ class SemanticDiscoveryAndLineageTest {
   }
 
   @Test
+  void derivedSourceLineageIncludesEveryParsedPhysicalTableAndFailsClosed() {
+    LinkedHashMap<String, SemanticModel.SemanticObject> objects =
+        new LinkedHashMap<>(model.objects());
+    objects.put(
+        "retail.derived_orders",
+        derivedObject(
+            "derived_orders",
+            "SELECT o.order_id, c.customer_id FROM postgres.public.orders o "
+                + "JOIN lakehouse.analytics.customers c ON c.customer_id = o.customer_id"));
+    objects.put(
+        "retail.invalid_derived",
+        derivedObject("invalid_derived", "SELECT order_id FROM orders"));
+    SemanticModel derived =
+        new SemanticModel(
+            model.project(), objects, model.metrics(), model.revision(), model.loadedAt());
+    SemanticCatalog derivedCatalog = mock(SemanticCatalog.class);
+    when(derivedCatalog.model()).thenReturn(derived);
+    SemanticLineageService service =
+        new SemanticLineageService(
+            derivedCatalog,
+            new PhysicalLineagePolicy(),
+            new SemanticProperties("semantic-model", "test", null, null, null));
+
+    SemanticLineageService.LineageResult result =
+        service.lineage(
+            principal,
+            new SemanticLineageService.LineageRequest(
+                "retail.derived_orders",
+                SemanticLineageService.Direction.upstream,
+                1,
+                Set.of(),
+                true));
+    SemanticLineageService.LineageResult invalid =
+        service.lineage(
+            principal,
+            new SemanticLineageService.LineageRequest(
+                "retail.invalid_derived",
+                SemanticLineageService.Direction.upstream,
+                1,
+                Set.of(),
+                true));
+
+    assertThat(result.nodes())
+        .extracting(SemanticLineageService.LineageNode::id)
+        .contains("physical:postgres.public.orders", "physical:lakehouse.analytics.customers");
+    assertThat(result.edges())
+        .contains(
+            new SemanticLineageService.LineageEdge(
+                "physical:postgres.public.orders",
+                "retail.derived_orders",
+                "SOURCES",
+                "physical"),
+            new SemanticLineageService.LineageEdge(
+                "physical:lakehouse.analytics.customers",
+                "retail.derived_orders",
+                "SOURCES",
+                "physical"));
+    assertThat(invalid.nodes())
+        .extracting(SemanticLineageService.LineageNode::type)
+        .doesNotContain(SemanticLineageService.NodeType.physical_object);
+  }
+
+  @Test
   void inaccessibleLineageRootDoesNotRevealExistence() {
     SemanticLineageService service =
         new SemanticLineageService(
@@ -154,12 +217,123 @@ class SemanticDiscoveryAndLineageTest {
         .isEqualTo(SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND);
   }
 
+  @Test
+  void boundsShortestPathExpansionOnDenseRelationshipGraph() {
+    LinkedHashMap<String, SemanticModel.SemanticObject> objects = new LinkedHashMap<>();
+    for (int i = 0; i <= 100; i++) {
+      String name = "node_" + i;
+      List<SemanticModel.Relationship> relationships = new java.util.ArrayList<>();
+      for (int j = 0; j <= 100; j++) {
+        if (i == j) continue;
+        relationships.add(
+            new SemanticModel.Relationship(
+                "to_" + j,
+                "node_" + j,
+                List.of("id"),
+                List.of("id"),
+                SemanticModel.Cardinality.many_to_one,
+                SemanticModel.JoinType.left));
+      }
+      objects.put(name, graphObject(name, relationships));
+    }
+    objects.put("unreachable", graphObject("unreachable", List.of()));
+    SemanticModel dense =
+        new SemanticModel(
+            model.project(), objects, java.util.Map.of(), model.revision(), model.loadedAt());
+
+    assertThatThrownBy(
+            () ->
+                new SemanticRelationshipGraph(dense)
+                    .uniqueShortestPath("retail.node_0", "retail.unreachable"))
+        .isInstanceOf(SemanticException.class)
+        .hasMessageContaining("Relationship path search exceeded 10000 expanded states");
+  }
+
+  @Test
+  void reportsOnlyABoundedDeterministicSetOfShortestPathCandidates() {
+    LinkedHashMap<String, SemanticModel.SemanticObject> objects =
+        new LinkedHashMap<>(model.objects());
+    SemanticModel.SemanticObject orders = objects.get("retail.orders");
+    List<SemanticModel.Relationship> relationships =
+        new java.util.ArrayList<>(orders.spec().relationships());
+    for (int i = 0; i < 8; i++) {
+      relationships.add(
+          new SemanticModel.Relationship(
+              "alternate_customer_" + i,
+              "customers",
+              List.of("customer_id"),
+              List.of("customer_id"),
+              SemanticModel.Cardinality.many_to_one,
+              SemanticModel.JoinType.left));
+    }
+    objects.put(
+        "retail.orders",
+        new SemanticModel.SemanticObject(
+            orders.version(),
+            orders.kind(),
+            orders.metadata(),
+            new SemanticModel.ObjectSpec(
+                orders.spec().source(),
+                orders.spec().primaryKey(),
+                orders.spec().dimensions(),
+                relationships),
+            orders.file()));
+    SemanticModel candidates =
+        new SemanticModel(
+            model.project(), objects, model.metrics(), model.revision(), model.loadedAt());
+
+    SemanticRelationshipGraph.PathResult result =
+        new SemanticRelationshipGraph(candidates)
+            .uniqueShortestPath("retail.orders", "retail.customers");
+
+    assertThat(result.ambiguous()).isTrue();
+    assertThat(result.candidatePaths())
+        .extracting(path -> path.getFirst().relationship().name())
+        .containsExactly(
+            "alternate_customer_0",
+            "alternate_customer_1",
+            "alternate_customer_2",
+            "alternate_customer_3",
+            "alternate_customer_4");
+  }
+
+  private SemanticModel.SemanticObject graphObject(
+      String name, List<SemanticModel.Relationship> relationships) {
+    return new SemanticModel.SemanticObject(
+        1,
+        "object",
+        new SemanticModel.Metadata(
+            name, "retail", name, "Graph test object", "test", List.of()),
+        new SemanticModel.ObjectSpec(
+            new SemanticModel.Source("test", "test", name),
+            List.of("id"),
+            List.of(new SemanticModel.Dimension("id", "ID", "ID", "bigint", "id", false)),
+            relationships),
+        "objects/" + name + ".yaml");
+  }
+
+  private SemanticModel.SemanticObject derivedObject(String name, String select) {
+    return new SemanticModel.SemanticObject(
+        1,
+        "object",
+        new SemanticModel.Metadata(
+            name, "retail", name, "Derived lineage test object", "test", List.of()),
+        new SemanticModel.ObjectSpec(
+            new SemanticModel.Source(null, null, null, select),
+            List.of("order_id"),
+            List.of(
+                new SemanticModel.Dimension(
+                    "order_id", "Order ID", "Order ID", "bigint", "order_id", false)),
+            List.of()),
+        "objects/" + name + ".yaml");
+  }
+
   private SemanticModel withMetricAlias(SemanticModel source) {
     LinkedHashMap<String, SemanticModel.Metric> metrics = new LinkedHashMap<>(source.metrics());
-    SemanticModel.Metric revenue = metrics.get("total_revenue");
+    SemanticModel.Metric revenue = metrics.get("retail.total_revenue");
     SemanticModel.Metadata revenueMetadata = revenue.metadata();
     metrics.put(
-        "total_revenue",
+        "retail.total_revenue",
         new SemanticModel.Metric(
             revenue.version(),
             revenue.kind(),
@@ -173,10 +347,10 @@ class SemanticDiscoveryAndLineageTest {
                 List.of("bookings")),
             revenue.spec(),
             revenue.file()));
-    SemanticModel.Metric count = metrics.get("order_count");
+    SemanticModel.Metric count = metrics.get("retail.order_count");
     SemanticModel.Metadata countMetadata = count.metadata();
     metrics.put(
-        "order_count",
+        "retail.order_count",
         new SemanticModel.Metric(
             count.version(),
             count.kind(),
@@ -200,6 +374,14 @@ class SemanticDiscoveryAndLineageTest {
         SemanticPrincipal principal, SemanticModel model, SemanticModel.Metric metric) {
       return super.canReadMetric(principal, model, metric)
           && !metric.metadata().tags().contains("finance");
+    }
+  }
+
+  private static final class PhysicalLineagePolicy
+      extends SemanticQueryServiceTest.AllowPolicy {
+    @Override
+    public boolean canViewPhysicalLineage(SemanticPrincipal principal) {
+      return true;
     }
   }
 }

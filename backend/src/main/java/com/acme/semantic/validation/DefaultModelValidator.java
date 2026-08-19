@@ -113,14 +113,20 @@ public class DefaultModelValidator implements ModelValidator {
               "DUPLICATE_RELATIONSHIP",
               "Relationship names must be unique within an object");
         }
-        var target = model.objects().get(rel.targetObject());
+        var targetResolution = model.resolveObject(rel.targetObject(), model.domain(object));
+        var target = targetResolution.value();
         if (target == null) {
           error(
               out,
               file,
               p + ".targetObject",
               "UNKNOWN_TARGET",
-              "Target object does not exist: " + rel.targetObject());
+              targetResolution.ambiguous()
+                  ? "Target object reference is ambiguous: "
+                      + rel.targetObject()
+                      + "; candidates: "
+                      + String.join(", ", targetResolution.candidates())
+                  : "Target object does not exist: " + rel.targetObject());
           continue;
         }
         if (rel.sourceFields().size() != rel.targetFields().size() || rel.sourceFields().isEmpty())
@@ -162,7 +168,9 @@ public class DefaultModelValidator implements ModelValidator {
         error(out, file, "spec", "REQUIRED", "Metric specification is required");
         continue;
       }
-      var base = model.objects().get(metric.spec().baseObject());
+      var baseResolution =
+          model.resolveObject(metric.spec().baseObject(), model.domain(metric));
+      var base = baseResolution.value();
       if (metric.version() != 1)
         error(out, file, "version", "UNSUPPORTED_VERSION", "Only schema version 1 is supported");
       if (base == null) {
@@ -171,7 +179,12 @@ public class DefaultModelValidator implements ModelValidator {
             file,
             "spec.baseObject",
             "UNKNOWN_BASE_OBJECT",
-            "Base object does not exist: " + metric.spec().baseObject());
+            baseResolution.ambiguous()
+                ? "Base object reference is ambiguous: "
+                    + metric.spec().baseObject()
+                    + "; candidates: "
+                    + String.join(", ", baseResolution.candidates())
+                : "Base object does not exist: " + metric.spec().baseObject());
         continue;
       }
       if (!SAFE_IDENTIFIER.matcher(model.domain(metric)).matches())
@@ -181,13 +194,6 @@ public class DefaultModelValidator implements ModelValidator {
             "metadata.domain",
             "INVALID_IDENTIFIER",
             "Domain must be a safe PostgreSQL schema identifier");
-      if (!model.domain(metric).equals(model.domain(base)))
-        error(
-            out,
-            file,
-            "metadata.domain",
-            "DOMAIN_MISMATCH",
-            "Metric domain must match its base object's domain");
       validateMetricExpression(
           out,
           file,
@@ -209,13 +215,18 @@ public class DefaultModelValidator implements ModelValidator {
             "Format must be one of: " + String.join(", ", FORMATS));
       for (int i = 0; i < metric.spec().filters().size(); i++) {
         var filter = metric.spec().filters().get(i);
+        String filterPath = "spec.filters[" + i + "]";
         if (base.dimension(filter.field()).isEmpty())
           error(
               out,
               file,
-              "spec.filters[" + i + "].field",
+              filterPath + ".field",
               "UNKNOWN_FIELD",
               "Metric filter field does not exist");
+        if (filter.operator() == null) {
+          error(out, file, filterPath + ".operator", "REQUIRED", "Filter operator is required");
+          continue;
+        }
         int valueCount = filter.values().size();
         boolean nullOperator =
             filter.operator() == SemanticModel.FilterOperator.is_null
@@ -229,7 +240,7 @@ public class DefaultModelValidator implements ModelValidator {
           error(
               out,
               file,
-              "spec.filters[" + i + "].values",
+              filterPath + ".values",
               "INVALID_FILTER_ARITY",
               "Filter value count does not match operator " + filter.operator());
       }
@@ -240,9 +251,7 @@ public class DefaultModelValidator implements ModelValidator {
             "metadata.name",
             "NAME_COLLISION",
             "Metric collides with dimension on base object");
-      SemanticModel.SemanticObject sameNameObject =
-          model.objects().get(metric.metadata().name());
-      if (sameNameObject != null && model.domain(sameNameObject).equals(model.domain(metric))) {
+      if (model.objectById(model.metricId(metric)).isPresent()) {
         error(
             out,
             file,
@@ -290,6 +299,14 @@ public class DefaultModelValidator implements ModelValidator {
         SOURCE_SELECTS.render(source.select());
       } catch (SqlCompilationException e) {
         error(out, file, "spec.source.select", "UNSAFE_SOURCE_SELECT", e.getMessage());
+      } catch (RuntimeException e) {
+        error(
+            out,
+            file,
+            "spec.source.select",
+            "UNSAFE_SOURCE_SELECT",
+            "Invalid derived source SELECT: "
+                + Objects.toString(e.getMessage(), e.getClass().getSimpleName()));
       }
       return;
     }
@@ -362,6 +379,10 @@ public class DefaultModelValidator implements ModelValidator {
 
   private void validateMetricType(
       List<ValidationError> out, String file, SemanticModel.Metric metric) {
+    if (metric.spec().aggregation() == null) {
+      error(out, file, "spec.aggregation", "REQUIRED", "Metric aggregation is required");
+      return;
+    }
     String type = normalizeType(metric.spec().resultType());
     switch (metric.spec().aggregation()) {
       case count, count_distinct -> {

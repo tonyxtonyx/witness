@@ -504,8 +504,7 @@ public class PgQueryService {
             position++;
           }
           for (var metric : catalog.model().metrics().values()) {
-            if (!metric.spec().baseObject().equals(object.metadata().name())
-                || !catalog.model().domain(metric).equals(domain)) continue;
+            if (!belongsTo(metric, object)) continue;
             if (matchesPattern(metric.metadata().name(), attributePattern))
               source.add(
                   catalogProjectionRow(
@@ -701,8 +700,7 @@ public class PgQueryService {
             attributeRow(
                 o, d.name(), pos++, Boolean.FALSE.equals(d.nullable()), d.type(), d.description()));
       for (var m : catalog.model().metrics().values())
-        if (m.spec().baseObject().equals(o.metadata().name())
-            && catalog.model().domain(m).equals(catalog.model().domain(o)))
+        if (belongsTo(m, o))
           rows.add(
               attributeRow(
                   o,
@@ -901,9 +899,7 @@ public class PgQueryService {
                 "NO",
                 "NO"));
       for (var m : catalog.model().metrics().values())
-        if (m.spec().baseObject().equals(o.metadata().name())
-            && catalog.model().domain(m).equals(domain)
-            && matchesPattern(m.metadata().name(), columnPattern))
+        if (belongsTo(m, o) && matchesPattern(m.metadata().name(), columnPattern))
           rows.add(
               row(
                   "semantic",
@@ -983,8 +979,7 @@ public class PgQueryService {
         position++;
       }
       for (var metric : catalog.model().metrics().values()) {
-        if (!metric.spec().baseObject().equals(object.metadata().name())
-            || !catalog.model().domain(metric).equals(domain)) continue;
+        if (!belongsTo(metric, object)) continue;
         if (matchesPattern(metric.metadata().name(), columnPattern))
           rows.add(
               pgJdbcColumnRow(
@@ -1374,6 +1369,15 @@ public class PgQueryService {
 
   private String cleanConstantSql(String sql) {
     return commentFree(sql).strip();
+  }
+
+  private boolean belongsTo(
+      SemanticModel.Metric metric, SemanticModel.SemanticObject object) {
+    return catalog
+            .model()
+            .resolveObject(metric.spec().baseObject(), catalog.model().domain(metric))
+            .value()
+        == object;
   }
 
   private String commentFree(String sql) {

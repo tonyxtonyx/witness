@@ -8,16 +8,26 @@ import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.util.TablesNamesFinder;
 
 /**
- * Validates governed SQL used as the physical source of a derived semantic object.
+ * Applies parse-level restrictions to trusted SQL used as a derived object's physical source.
  *
  * <p>This policy is intentionally narrower than arbitrary Trino SQL. A model source must be one
- * read-only SELECT, and every physical table must be fully qualified. The validated SELECT is
- * rendered as a subquery by {@link AstSemanticSqlCompiler}.
+ * read-only SELECT, and every physical table must be fully qualified. It is not a whitelist
+ * renderer and does not constrain which catalogs the Trino identity can read. GitLab mode relies
+ * on merge-request review for that trust decision; local mode has no review step. The validated
+ * SELECT is rendered as a subquery by {@link AstSemanticSqlCompiler}.
  */
 public final class SourceSelectPolicy {
   private static final int MAX_SQL_LENGTH = 64 * 1024;
 
   public String render(String sql) {
+    return analyze(sql).rendered();
+  }
+
+  public List<String> referencedTables(String sql) {
+    return analyze(sql).tables();
+  }
+
+  private Analysis analyze(String sql) {
     if (sql == null || sql.isBlank()) {
       throw invalid("Derived source SELECT is required");
     }
@@ -41,8 +51,7 @@ public final class SourceSelectPolicy {
       throw invalid("Derived object source must be a read-only SELECT");
     }
 
-    PlainSelect plainSelect = select.getPlainSelect();
-    if (plainSelect == null) {
+    if (!(select instanceof PlainSelect plainSelect)) {
       throw invalid("Set operations are not supported in a derived source");
     }
     if (select.getWithItemsList() != null && !select.getWithItemsList().isEmpty()) {
@@ -59,17 +68,24 @@ public final class SourceSelectPolicy {
     if (tables.isEmpty()) {
       throw invalid("Derived source SELECT must read at least one physical table");
     }
-    for (String table : tables) {
-      String unquoted = table.replace("\"", "").replace("`", "");
+    List<String> normalizedTables =
+        tables.stream()
+            .map(table -> table.replace("\"", "").replace("`", ""))
+            .distinct()
+            .sorted()
+            .toList();
+    for (String unquoted : normalizedTables) {
       if (unquoted.split("\\.").length != 3) {
         throw invalid(
-            "Physical table must be fully qualified as catalog.schema.table: " + table);
+            "Physical table must be fully qualified as catalog.schema.table: " + unquoted);
       }
     }
-    return statement.toString();
+    return new Analysis(statement.toString(), normalizedTables);
   }
 
   private SqlCompilationException invalid(String message) {
     return new SqlCompilationException("0A000", message);
   }
+
+  private record Analysis(String rendered, List<String> tables) {}
 }

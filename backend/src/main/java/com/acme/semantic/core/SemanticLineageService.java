@@ -1,6 +1,7 @@
 package com.acme.semantic.core;
 
 import com.acme.semantic.catalog.SemanticCatalog;
+import com.acme.semantic.compiler.SourceSelectPolicy;
 import com.acme.semantic.config.SemanticProperties;
 import com.acme.semantic.model.SemanticModel;
 import java.util.ArrayDeque;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class SemanticLineageService {
+  private static final SourceSelectPolicy SOURCE_SELECTS = new SourceSelectPolicy();
   private final SemanticCatalog catalog;
   private final SemanticAccessPolicy policy;
   private final SemanticProperties.Mcp config;
@@ -142,7 +144,8 @@ public class SemanticLineageService {
         edges.add(new LineageEdge(objectId, dimensionId, "HAS_DIMENSION", "semantic"));
       }
       for (SemanticModel.Relationship relationship : object.spec().relationships()) {
-        SemanticModel.SemanticObject target = model.objects().get(relationship.targetObject());
+        SemanticModel.SemanticObject target =
+            model.resolveObject(relationship.targetObject(), model.domain(object)).value();
         if (target == null || !policy.canReadObject(principal, model, target)) continue;
         String targetId = SemanticIds.objectId(model, target);
         nodes.putIfAbsent(
@@ -155,28 +158,25 @@ public class SemanticLineageService {
         edges.add(new LineageEdge(objectId, targetId, "RELATES_TO", "semantic"));
       }
       if (requestedPhysical
-          && policy.canViewPhysicalLineage(principal)
-          && !object.spec().source().derived()) {
-        String physicalId =
-            "physical:"
-                + object.spec().source().catalog()
-                + "."
-                + object.spec().source().schema()
-                + "."
-                + object.spec().source().table();
-        nodes.put(
-            physicalId,
-            new LineageNode(
-                physicalId,
-                NodeType.physical_object,
-                object.spec().source().table(),
-                "physical"));
-        edges.add(new LineageEdge(physicalId, objectId, "SOURCES", "physical"));
+          && policy.canViewPhysicalLineage(principal)) {
+        List<String> physicalTables = physicalTables(object.spec().source());
+        for (String table : physicalTables) {
+          String physicalId = "physical:" + table;
+          nodes.put(
+              physicalId,
+              new LineageNode(
+                  physicalId,
+                  NodeType.physical_object,
+                  table.substring(table.lastIndexOf('.') + 1),
+                  "physical"));
+          edges.add(new LineageEdge(physicalId, objectId, "SOURCES", "physical"));
+        }
       }
     }
     for (SemanticModel.Metric metric : model.metrics().values()) {
       if (!policy.canReadMetric(principal, model, metric)) continue;
-      SemanticModel.SemanticObject base = model.objects().get(metric.spec().baseObject());
+      SemanticModel.SemanticObject base =
+          model.resolveObject(metric.spec().baseObject(), model.domain(metric)).value();
       if (base == null || !policy.canReadObject(principal, model, base)) continue;
       String metricId = SemanticIds.metricId(model, metric);
       String objectId = SemanticIds.objectId(model, base);
@@ -196,6 +196,17 @@ public class SemanticLineageService {
       }
     }
     return new Graph(Map.copyOf(nodes), Set.copyOf(edges));
+  }
+
+  private List<String> physicalTables(SemanticModel.Source source) {
+    if (!source.derived()) {
+      return List.of(source.catalog() + "." + source.schema() + "." + source.table());
+    }
+    try {
+      return SOURCE_SELECTS.referencedTables(source.select());
+    } catch (RuntimeException ignored) {
+      return List.of();
+    }
   }
 
   private Set<String> referencedDimensions(

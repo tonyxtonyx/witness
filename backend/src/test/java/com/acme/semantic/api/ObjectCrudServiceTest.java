@@ -42,7 +42,7 @@ class ObjectCrudServiceTest {
 
   @Test
   void updatesObjectAndReloadsTheLocalCatalog() {
-    SemanticModel.SemanticObject current = catalog.model().objects().get("customers");
+    SemanticModel.SemanticObject current = catalog.model().objects().get("retail.customers");
     var metadata =
         new SemanticModel.Metadata(
             "customers",
@@ -57,13 +57,13 @@ class ObjectCrudServiceTest {
             "customers", new ObjectCrudService.ObjectInput(metadata, current.spec()));
 
     assertThat(updated.metadata().label()).isEqualTo("Customer directory");
-    assertThat(catalog.model().objects().get("customers").metadata().owner())
+    assertThat(catalog.model().objects().get("retail.customers").metadata().owner())
         .isEqualTo("customer-platform");
   }
 
   @Test
   void movesObjectYamlWhenItsDomainChanges() {
-    SemanticModel.SemanticObject current = catalog.model().objects().get("customers");
+    SemanticModel.SemanticObject current = catalog.model().objects().get("retail.customers");
     var metadata =
         new SemanticModel.Metadata(
             "customers",
@@ -85,7 +85,7 @@ class ObjectCrudServiceTest {
 
   @Test
   void createsObjectAndReloadsTheLocalCatalog() {
-    SemanticModel.SemanticObject source = catalog.model().objects().get("customers");
+    SemanticModel.SemanticObject source = catalog.model().objects().get("retail.customers");
     var metadata =
         new SemanticModel.Metadata(
             "customer_profiles",
@@ -99,7 +99,7 @@ class ObjectCrudServiceTest {
         service.create(new ObjectCrudService.ObjectInput(metadata, source.spec()));
 
     assertThat(created.metadata().name()).isEqualTo("customer_profiles");
-    assertThat(catalog.model().objects()).containsKey("customer_profiles");
+    assertThat(catalog.model().objects()).containsKey("retail.customer_profiles");
     assertThat(
             Files.exists(
                 temporaryModel.resolve(
@@ -108,8 +108,28 @@ class ObjectCrudServiceTest {
   }
 
   @Test
+  void defaultsBlankObjectDomainToProjectSemanticSchema() {
+    SemanticModel.SemanticObject source = catalog.model().objects().get("retail.customers");
+    var metadata =
+        new SemanticModel.Metadata(
+            "default_domain_object",
+            " ",
+            "Default domain object",
+            "Uses the project semantic schema",
+            "customer-platform",
+            java.util.List.of("customer"));
+
+    SemanticModel.SemanticObject created =
+        service.create(new ObjectCrudService.ObjectInput(metadata, source.spec()));
+
+    assertThat(created.metadata().domain()).isEqualTo("semantic");
+    assertThat(created.file())
+        .isEqualTo("domains/semantic/objects/default_domain_object.yaml");
+  }
+
+  @Test
   void createsDerivedObjectAndReloadsTheLocalCatalog() throws Exception {
-    SemanticModel.SemanticObject source = catalog.model().objects().get("customers");
+    SemanticModel.SemanticObject source = catalog.model().objects().get("retail.customers");
     var metadata =
         new SemanticModel.Metadata(
             "customer_orders",

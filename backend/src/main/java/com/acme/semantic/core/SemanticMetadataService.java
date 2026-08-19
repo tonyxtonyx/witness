@@ -147,7 +147,8 @@ public class SemanticMetadataService {
     policy.requireAuthenticated(principal);
     SemanticModel model = catalog.model();
     SemanticModel.Metric metric = SemanticIds.requireMetric(model, policy, principal, metricId);
-    SemanticModel.SemanticObject base = model.objects().get(metric.spec().baseObject());
+    SemanticModel.SemanticObject base =
+        model.resolveObject(metric.spec().baseObject(), model.domain(metric)).value();
     if (base == null || !policy.canReadObject(principal, model, base)) {
       throw new SemanticException(
           SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
@@ -158,9 +159,9 @@ public class SemanticMetadataService {
     for (SemanticModel.SemanticObject object : model.objects().values()) {
       if (!policy.canReadObject(principal, model, object)) continue;
       SemanticRelationshipGraph.PathResult path =
-          graph.uniqueShortestPath(base.metadata().name(), object.metadata().name());
+          graph.uniqueShortestPath(model.objectId(base), model.objectId(object));
       if (path.ambiguous() || path.path().isEmpty()) continue;
-      if (!graph.fanoutSafe(base.metadata().name(), path.edges())) continue;
+      if (!graph.fanoutSafe(model.objectId(base), path.edges())) continue;
       List<String> joinPath = path.edges().stream().map(edge -> edge.relationship().name()).toList();
       for (SemanticModel.Dimension dimension : object.spec().dimensions()) {
         if (policy.canReadDimension(principal, model, object, dimension)) {
@@ -206,7 +207,7 @@ public class SemanticMetadataService {
             SemanticIds.metricId(model, metric),
             metric.metadata().label(),
             metric.metadata().description(),
-            metric.spec().aggregation().name(),
+            aggregationName(metric.spec().aggregation()),
             metric.spec().format(),
             null,
             SemanticIds.certified(metric.metadata()),
@@ -243,7 +244,10 @@ public class SemanticMetadataService {
     definition.put(
         "metrics",
         model.metrics().values().stream()
-            .filter(metric -> metric.spec().baseObject().equals(object.metadata().name()))
+            .filter(
+                metric ->
+                    model.resolveObject(metric.spec().baseObject(), model.domain(metric)).value()
+                        == object)
             .filter(metric -> policy.canReadMetric(principal, model, metric))
             .map(metric -> SemanticIds.metricId(model, metric))
             .sorted()
@@ -251,16 +255,25 @@ public class SemanticMetadataService {
     definition.put(
         "relationships",
         object.spec().relationships().stream()
-            .filter(relationship -> model.objects().containsKey(relationship.targetObject()))
+            .filter(
+                relationship ->
+                    model.resolveObject(relationship.targetObject(), model.domain(object)).found())
             .filter(
                 relationship ->
                     policy.canReadObject(
-                        principal, model, model.objects().get(relationship.targetObject())))
+                        principal,
+                        model,
+                        model.resolveObject(relationship.targetObject(), model.domain(object)).value()))
             .map(
                 relationship ->
                     Map.of(
                         "name", relationship.name(),
-                        "target", SemanticIds.objectId(model, model.objects().get(relationship.targetObject())),
+                        "target",
+                            SemanticIds.objectId(
+                                model,
+                                model.resolveObject(
+                                        relationship.targetObject(), model.domain(object))
+                                    .value()),
                         "cardinality", relationship.cardinality().name()))
             .sorted(Comparator.comparing(value -> value.get("name").toString()))
             .toList());
@@ -275,7 +288,8 @@ public class SemanticMetadataService {
 
   private ObjectDefinition metricDefinition(
       SemanticPrincipal principal, SemanticModel model, SemanticModel.Metric metric) {
-    SemanticModel.SemanticObject base = model.objects().get(metric.spec().baseObject());
+    SemanticModel.SemanticObject base =
+        model.resolveObject(metric.spec().baseObject(), model.domain(metric)).value();
     if (base == null || !policy.canReadObject(principal, model, base)) {
       throw new SemanticException(
           SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
@@ -283,7 +297,7 @@ public class SemanticMetadataService {
     }
     Map<String, Object> definition = new LinkedHashMap<>();
     definition.put("baseObject", SemanticIds.objectId(model, base));
-    definition.put("aggregation", metric.spec().aggregation().name());
+    definition.put("aggregation", aggregationName(metric.spec().aggregation()));
     definition.put("expression", metric.spec().expression());
     definition.put("resultType", metric.spec().resultType());
     definition.put("format", metric.spec().format());
@@ -477,11 +491,16 @@ public class SemanticMetadataService {
   }
 
   private String additivity(SemanticModel.Aggregation aggregation) {
+    if (aggregation == null) return "unknown";
     return switch (aggregation) {
       case sum, count -> "additive";
       case count_distinct, avg -> "non_additive";
       default -> "semi_additive";
     };
+  }
+
+  private String aggregationName(SemanticModel.Aggregation aggregation) {
+    return aggregation == null ? "unknown" : aggregation.name();
   }
 
   private record Match(double score, List<String> reasons) {}

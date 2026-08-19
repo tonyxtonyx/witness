@@ -5,13 +5,24 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "semantic")
 public record SemanticProperties(
-    String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab, Mcp mcp) {
+    String modelPath,
+    String apiKey,
+    boolean allowInsecureApiKey,
+    Pgwire pgwire,
+    Trino trino,
+    Gitlab gitlab,
+    Mcp mcp) {
   @ConstructorBinding
   public SemanticProperties {}
 
   public SemanticProperties(
       String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab) {
-    this(modelPath, apiKey, pgwire, trino, gitlab, null);
+    this(modelPath, apiKey, false, pgwire, trino, gitlab, null);
+  }
+
+  public SemanticProperties(
+      String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab, Mcp mcp) {
+    this(modelPath, apiKey, false, pgwire, trino, gitlab, mcp);
   }
 
   public record Pgwire(

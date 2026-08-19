@@ -149,7 +149,8 @@ public class SemanticQueryService {
         hasSearch
             ? new ExtraCondition(
                 "STARTS_WITH(LOWER("
-                    + memberReference(requestedDimension.object(), requestedDimension.dimension())
+                    + memberReference(
+                        model, requestedDimension.object(), requestedDimension.dimension())
                     + "), LOWER(?))",
                 List.of(request.search().trim()))
             : null;
@@ -205,6 +206,28 @@ public class SemanticQueryService {
     allFilters.addAll(policyFilters);
     int requestedLimit = normalizeLimit(query.limit());
     String timezone = normalizeTimezone(query.timezone());
+    SemanticModel.SemanticObject base =
+        !metrics.isEmpty()
+            ? metrics.getFirst().object()
+            : !dimensions.isEmpty() ? dimensions.getFirst().object() : null;
+    if (base == null) invalid("Query must select a metric or dimension", "$");
+    LinkedHashSet<SemanticModel.SemanticObject> targets = new LinkedHashSet<>();
+    metrics.forEach(metric -> targets.add(metric.object()));
+    dimensions.forEach(dimension -> targets.add(dimension.object()));
+    allFilters.forEach(filter -> targets.add(filter.dimension().object()));
+
+    SemanticRelationshipGraph graph = new SemanticRelationshipGraph(model);
+    ResolvedJoinPaths explicitPaths =
+        resolveExplicitJoinPaths(principal, model, graph, base, targets, query.joinPaths());
+    JoinResolution joinResolution =
+        resolveJoins(principal, model, graph, base, targets, explicitPaths.paths());
+    validateMetricCompatibility(
+        model,
+        graph,
+        metrics,
+        targets,
+        joinResolution.paths(),
+        explicitPaths.paths());
     SemanticQuery normalized =
         new SemanticQuery(
             metrics.stream().map(ResolvedMetric::id).toList(),
@@ -217,21 +240,8 @@ public class SemanticQueryService {
             query.filters(),
             query.orderBy(),
             requestedLimit,
-            timezone);
-
-    SemanticModel.SemanticObject base =
-        !metrics.isEmpty()
-            ? metrics.getFirst().object()
-            : !dimensions.isEmpty() ? dimensions.getFirst().object() : null;
-    if (base == null) invalid("Query must select a metric or dimension", "$");
-    LinkedHashSet<SemanticModel.SemanticObject> targets = new LinkedHashSet<>();
-    metrics.forEach(metric -> targets.add(metric.object()));
-    dimensions.forEach(dimension -> targets.add(dimension.object()));
-    allFilters.forEach(filter -> targets.add(filter.dimension().object()));
-
-    SemanticRelationshipGraph graph = new SemanticRelationshipGraph(model);
-    List<JoinStep> joins = resolveJoins(principal, model, graph, base, targets);
-    validateMetricCompatibility(graph, metrics, targets);
+            timezone,
+            explicitPaths.normalized());
 
     List<Object> parameters = new ArrayList<>();
     String semanticSql =
@@ -242,7 +252,7 @@ public class SemanticQueryService {
             dimensions,
             allFilters,
             base,
-            joins,
+            joinResolution.joins(),
             parameters,
             options,
             requestedLimit);
@@ -288,9 +298,16 @@ public class SemanticQueryService {
       }
     }
     List<String> warnings = new ArrayList<>();
-    if (!"UTC".equals(timezone)) {
+    if (!"UTC".equals(timezone)
+        && dimensions.stream()
+            .anyMatch(
+                dimension ->
+                    dimension.granularity() != null
+                        && normalizeType(dimension.dimension().type()).equals("timestamp"))) {
       warnings.add(
-          "Timezone is validated and normalized, but schema v1 timestamps use the configured Trino session timezone");
+          "Timestamps are assumed to be stored in UTC and are converted to "
+              + timezone
+              + " for time bucketing");
     }
     return new PlannedQuery(
         model,
@@ -299,7 +316,7 @@ public class SemanticQueryService {
         List.copyOf(parameters),
         metrics,
         dimensions,
-        joins,
+        joinResolution.joins(),
         List.copyOf(output),
         List.copyOf(warnings));
   }
@@ -314,7 +331,8 @@ public class SemanticQueryService {
       String id = values.get(i);
       if (!unique.add(id)) invalid("Duplicate metric ID: " + id, "$.metrics[" + i + "]");
       SemanticModel.Metric metric = SemanticIds.requireMetric(model, policy, principal, id);
-      SemanticModel.SemanticObject object = model.objects().get(metric.spec().baseObject());
+      SemanticModel.SemanticObject object =
+          model.resolveObject(metric.spec().baseObject(), model.domain(metric)).value();
       if (object == null || !policy.canReadObject(principal, model, object)) {
         throw new SemanticException(
             SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
@@ -414,36 +432,133 @@ public class SemanticQueryService {
     }
   }
 
-  private List<JoinStep> resolveJoins(
+  private ResolvedJoinPaths resolveExplicitJoinPaths(
       SemanticPrincipal principal,
       SemanticModel model,
       SemanticRelationshipGraph graph,
       SemanticModel.SemanticObject base,
-      Collection<SemanticModel.SemanticObject> targets) {
-    LinkedHashMap<String, JoinStep> joins = new LinkedHashMap<>();
-    Set<String> joined = new LinkedHashSet<>();
-    joined.add(base.metadata().name());
-    for (SemanticModel.SemanticObject target : targets) {
-      SemanticRelationshipGraph.PathResult result =
-          graph.uniqueShortestPath(base.metadata().name(), target.metadata().name());
-      if (result.ambiguous()) {
-        throw new SemanticException(
-            SemanticErrorCode.AMBIGUOUS_JOIN_PATH,
-            "More than one shortest semantic join path exists between "
-                + SemanticIds.objectId(model, base)
-                + " and "
-                + SemanticIds.objectId(model, target));
+      Collection<SemanticModel.SemanticObject> targets,
+      List<SemanticQuery.JoinPath> requested) {
+    List<SemanticQuery.JoinPath> values = requested == null ? List.of() : requested;
+    if (values.size() > 20) invalid("A semantic query may contain at most 20 join paths", "$.joinPaths");
+    Set<String> targetIds = new LinkedHashSet<>();
+    targets.forEach(target -> targetIds.add(model.objectId(target)));
+    LinkedHashMap<String, List<SemanticRelationshipGraph.Edge>> paths = new LinkedHashMap<>();
+    List<SemanticQuery.JoinPath> normalized = new ArrayList<>();
+    String baseId = model.objectId(base);
+    for (int i = 0; i < values.size(); i++) {
+      SemanticQuery.JoinPath requestedPath = values.get(i);
+      String path = "$.joinPaths[" + i + "]";
+      if (requestedPath == null || requestedPath.to() == null || requestedPath.to().isBlank()) {
+        invalid("Join path target is required", path + ".to");
       }
-      List<SemanticRelationshipGraph.Edge> path =
-          result.path().orElseThrow(
-              () ->
-                  new SemanticException(
-                      SemanticErrorCode.INCOMPATIBLE_METRICS_AND_DIMENSIONS,
-                      "No semantic join path exists between requested members"));
-      String current = base.metadata().name();
+      SemanticModel.Resolution<SemanticModel.SemanticObject> resolution =
+          model.resolveObject(requestedPath.to());
+      if (resolution.ambiguous()) {
+        invalid(
+            "Join path target is ambiguous: " + String.join(", ", resolution.candidates()),
+            path + ".to");
+      }
+      SemanticModel.SemanticObject target = resolution.value();
+      if (target == null || !policy.canReadObject(principal, model, target)) {
+        invalid("Join path target was not found or is not accessible", path + ".to");
+      }
+      String targetId = model.objectId(target);
+      if (!targetIds.contains(targetId)) {
+        invalid("Join path target is not used by this query: " + targetId, path + ".to");
+      }
+      if (paths.containsKey(targetId)) {
+        invalid("Duplicate join path target: " + targetId, path + ".to");
+      }
+      if (requestedPath.via().size() > 20) {
+        invalid("A join path may contain at most 20 relationships", path + ".via");
+      }
+      List<SemanticRelationshipGraph.Edge> edges = new ArrayList<>();
+      String current = baseId;
+      for (int hop = 0; hop < requestedPath.via().size(); hop++) {
+        String relationship = requestedPath.via().get(hop);
+        String hopPath = path + ".via[" + hop + "]";
+        if (relationship == null || relationship.isBlank()) {
+          invalid("Join path relationship names must be non-empty", hopPath);
+        }
+        List<SemanticRelationshipGraph.Edge> matches =
+            graph.edgesFrom(current).stream()
+                .filter(edge -> edge.relationship().name().equals(relationship))
+                .toList();
+        if (matches.size() != 1) {
+          invalid(
+              matches.isEmpty()
+                  ? "Join path relationship is not connected at hop "
+                      + hop
+                      + ": "
+                      + relationship
+                  : "Join path relationship is ambiguous at hop "
+                      + hop
+                      + ": "
+                      + relationship,
+              hopPath);
+        }
+        SemanticRelationshipGraph.Edge edge = matches.getFirst();
+        String next = edge.other(current);
+        SemanticModel.SemanticObject nextObject = model.objectById(next).orElse(null);
+        if (nextObject == null || !policy.canReadObject(principal, model, nextObject)) {
+          invalid(
+              "Join path relationship is not readable at hop " + hop + ": " + relationship,
+              hopPath);
+        }
+        edges.add(edge);
+        current = next;
+      }
+      if (!current.equals(targetId)) {
+        int hop = requestedPath.via().size() - 1;
+        invalid(
+            hop < 0
+                ? "Join path has no relationship hop to target " + targetId
+                : "Join path does not reach target "
+                    + targetId
+                    + " at hop "
+                    + hop
+                    + ": "
+                    + requestedPath.via().get(hop),
+            hop < 0 ? path + ".via" : path + ".via[" + hop + "]");
+      }
+      paths.put(targetId, List.copyOf(edges));
+      normalized.add(new SemanticQuery.JoinPath(targetId, requestedPath.via()));
+    }
+    return new ResolvedJoinPaths(Map.copyOf(paths), List.copyOf(normalized));
+  }
+
+  private JoinResolution resolveJoins(
+      SemanticPrincipal principal,
+      SemanticModel model,
+      SemanticRelationshipGraph graph,
+      SemanticModel.SemanticObject base,
+      Collection<SemanticModel.SemanticObject> targets,
+      Map<String, List<SemanticRelationshipGraph.Edge>> explicitPaths) {
+    LinkedHashMap<String, JoinStep> joins = new LinkedHashMap<>();
+    LinkedHashMap<String, List<SemanticRelationshipGraph.Edge>> paths = new LinkedHashMap<>();
+    Set<String> joined = new LinkedHashSet<>();
+    String baseId = model.objectId(base);
+    joined.add(baseId);
+    for (SemanticModel.SemanticObject target : targets) {
+      String targetId = model.objectId(target);
+      List<SemanticRelationshipGraph.Edge> path = explicitPaths.get(targetId);
+      if (path == null) {
+        SemanticRelationshipGraph.PathResult result =
+            graph.uniqueShortestPath(baseId, targetId);
+        if (result.ambiguous()) throw ambiguousJoinPath(result, baseId, targetId);
+        path =
+            result.path().orElseThrow(
+                () ->
+                    new SemanticException(
+                        SemanticErrorCode.INCOMPATIBLE_METRICS_AND_DIMENSIONS,
+                        "No semantic join path exists between requested members"));
+      }
+      paths.put(targetId, path);
+      String current = baseId;
       for (SemanticRelationshipGraph.Edge edge : path) {
         String next = edge.other(current);
-        SemanticModel.SemanticObject nextObject = model.objects().get(next);
+        SemanticModel.SemanticObject nextObject = model.objectById(next).orElse(null);
         if (nextObject == null || !policy.canReadObject(principal, model, nextObject)) {
           throw new SemanticException(
               SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
@@ -461,29 +576,38 @@ public class SemanticQueryService {
         current = next;
       }
     }
-    return List.copyOf(joins.values());
+    return new JoinResolution(List.copyOf(joins.values()), Map.copyOf(paths));
   }
 
   private void validateMetricCompatibility(
+      SemanticModel model,
       SemanticRelationshipGraph graph,
       List<ResolvedMetric> metrics,
-      Collection<SemanticModel.SemanticObject> targets) {
+      Collection<SemanticModel.SemanticObject> targets,
+      Map<String, List<SemanticRelationshipGraph.Edge>> paths,
+      Map<String, List<SemanticRelationshipGraph.Edge>> explicitPaths) {
     for (ResolvedMetric metric : metrics) {
       for (SemanticModel.SemanticObject target : targets) {
-        SemanticRelationshipGraph.PathResult result =
-            graph.uniqueShortestPath(metric.object().metadata().name(), target.metadata().name());
-        if (result.ambiguous()) {
-          throw new SemanticException(
-              SemanticErrorCode.AMBIGUOUS_JOIN_PATH,
-              "Metric compatibility has an ambiguous semantic join path");
+        String metricObjectId = model.objectId(metric.object());
+        String targetId = model.objectId(target);
+        List<SemanticRelationshipGraph.Edge> path;
+        if (explicitPaths.containsKey(metricObjectId) || explicitPaths.containsKey(targetId)) {
+          path =
+              pathBetween(
+                  paths.getOrDefault(metricObjectId, List.of()),
+                  paths.getOrDefault(targetId, List.of()));
+        } else {
+          SemanticRelationshipGraph.PathResult result =
+              graph.uniqueShortestPath(metricObjectId, targetId);
+          if (result.ambiguous()) throw ambiguousJoinPath(result, metricObjectId, targetId);
+          path =
+              result.path().orElseThrow(
+                  () ->
+                      new SemanticException(
+                          SemanticErrorCode.INCOMPATIBLE_METRICS_AND_DIMENSIONS,
+                          "Requested metrics and dimensions are not connected"));
         }
-        List<SemanticRelationshipGraph.Edge> path =
-            result.path().orElseThrow(
-                () ->
-                    new SemanticException(
-                        SemanticErrorCode.INCOMPATIBLE_METRICS_AND_DIMENSIONS,
-                        "Requested metrics and dimensions are not connected"));
-        if (!graph.fanoutSafe(metric.object().metadata().name(), path)) {
+        if (!graph.fanoutSafe(model.objectId(metric.object()), path)) {
           throw new SemanticException(
               SemanticErrorCode.INCOMPATIBLE_METRICS_AND_DIMENSIONS,
               "A requested join path can duplicate rows behind metric " + metric.id(),
@@ -493,6 +617,33 @@ public class SemanticQueryService {
         }
       }
     }
+  }
+
+  private List<SemanticRelationshipGraph.Edge> pathBetween(
+      List<SemanticRelationshipGraph.Edge> left,
+      List<SemanticRelationshipGraph.Edge> right) {
+    int shared = 0;
+    while (shared < left.size()
+        && shared < right.size()
+        && left.get(shared).id().equals(right.get(shared).id())) shared++;
+    List<SemanticRelationshipGraph.Edge> path = new ArrayList<>();
+    for (int i = left.size() - 1; i >= shared; i--) path.add(left.get(i));
+    path.addAll(right.subList(shared, right.size()));
+    return List.copyOf(path);
+  }
+
+  private SemanticException ambiguousJoinPath(
+      SemanticRelationshipGraph.PathResult result, String from, String to) {
+    List<List<String>> candidates =
+        result.candidatePaths().stream()
+            .map(path -> path.stream().map(edge -> edge.relationship().name()).toList())
+            .toList();
+    return new SemanticException(
+        SemanticErrorCode.AMBIGUOUS_JOIN_PATH,
+        "More than one shortest semantic join path exists between " + from + " and " + to,
+        false,
+        Map.of("from", from, "to", to, "candidatePaths", candidates),
+        List.of("Set joinPaths with a to target and an exact via relationship-name list"));
   }
 
   private String renderSql(
@@ -511,14 +662,14 @@ public class SemanticQueryService {
     List<String> projections = new ArrayList<>();
     for (ResolvedDimension dimension : dimensions) {
       projections.add(
-          dimensionExpression(dimension)
+          dimensionExpression(model, dimension, query.timezone())
               + " AS "
               + quoteIdentifier(dimension.id()));
     }
     if (options.projectMetrics()) {
       for (ResolvedMetric metric : metrics) {
         projections.add(
-            metric.object().metadata().name()
+            objectAlias(model, metric.object())
                 + "."
                 + metric.metric().metadata().name()
                 + " AS "
@@ -532,25 +683,25 @@ public class SemanticQueryService {
         .append('.')
         .append(base.metadata().name())
         .append(' ')
-        .append(base.metadata().name());
+        .append(objectAlias(model, base));
     for (JoinStep step : joins) {
-      SemanticModel.SemanticObject target = model.objects().get(step.toObject());
+      SemanticModel.SemanticObject target = model.objectById(step.toObject()).orElseThrow();
       SemanticModel.Relationship relationship = step.edge().relationship();
       sql.append(joinKeyword(relationship.defaultJoinType()))
           .append(model.domain(target))
           .append('.')
           .append(target.metadata().name())
           .append(' ')
-          .append(target.metadata().name())
+          .append(objectAlias(model, target))
           .append(" ON ");
       List<String> equalities = new ArrayList<>();
       for (int i = 0; i < relationship.sourceFields().size(); i++) {
         equalities.add(
-            step.edge().sourceObject()
+            objectAlias(step.edge().sourceObject())
                 + "."
                 + relationship.sourceFields().get(i)
                 + " = "
-                + step.edge().targetObject()
+                + objectAlias(step.edge().targetObject())
                 + "."
                 + relationship.targetFields().get(i));
       }
@@ -558,7 +709,7 @@ public class SemanticQueryService {
     }
     List<String> conditions = new ArrayList<>();
     for (ResolvedFilter filter : filters) {
-      if (!filter.policyFilter()) conditions.add(renderFilter(filter, parameters));
+      if (!filter.policyFilter()) conditions.add(renderFilter(model, filter, parameters));
     }
     if (!conditions.isEmpty()) {
       String operator =
@@ -577,7 +728,7 @@ public class SemanticQueryService {
     }
     List<String> requiredConditions = new ArrayList<>();
     for (ResolvedFilter filter : filters) {
-      if (filter.policyFilter()) requiredConditions.add(renderFilter(filter, parameters));
+      if (filter.policyFilter()) requiredConditions.add(renderFilter(model, filter, parameters));
     }
     if (!requiredConditions.isEmpty()) {
       sql.append(conditions.isEmpty() && options.extraCondition() == null ? " WHERE " : " AND ")
@@ -589,16 +740,22 @@ public class SemanticQueryService {
       sql.append(" GROUP BY ")
           .append(
               String.join(
-                  ", ", dimensions.stream().map(this::dimensionExpression).toList()));
+                  ", ",
+                  dimensions.stream()
+                      .map(value -> dimensionExpression(model, value, query.timezone()))
+                      .toList()));
     }
     if (query.orderBy() != null && !query.orderBy().isEmpty()) {
       Map<String, String> selectable = new LinkedHashMap<>();
-      dimensions.forEach(value -> selectable.put(value.id(), dimensionExpression(value)));
+      dimensions.forEach(
+          value ->
+              selectable.put(
+                  value.id(), dimensionExpression(model, value, query.timezone())));
       metrics.forEach(
           value ->
               selectable.put(
                   value.id(),
-                  value.object().metadata().name()
+                  objectAlias(model, value.object())
                       + "."
                       + value.metric().metadata().name()));
       List<String> ordering = new ArrayList<>();
@@ -621,9 +778,11 @@ public class SemanticQueryService {
     return sql.toString();
   }
 
-  private String renderFilter(ResolvedFilter resolved, List<Object> parameters) {
+  private String renderFilter(
+      SemanticModel model, ResolvedFilter resolved, List<Object> parameters) {
     SemanticQuery.FilterCondition filter = resolved.condition();
-    String member = memberReference(resolved.dimension().object(), resolved.dimension().dimension());
+    String member =
+        memberReference(model, resolved.dimension().object(), resolved.dimension().dimension());
     return switch (filter.operator()) {
       case IS_NULL -> member + " IS NULL";
       case IS_NOT_NULL -> member + " IS NOT NULL";
@@ -675,7 +834,7 @@ public class SemanticQueryService {
                 ? planned.metrics().getFirst().object()
                 : planned.dimensions().getFirst().object()));
     for (JoinStep join : planned.joins()) {
-      String id = SemanticIds.objectId(planned.model(), planned.model().objects().get(join.toObject()));
+      String id = join.toObject();
       if (!models.contains(id)) models.add(id);
     }
     String complexity =
@@ -711,7 +870,13 @@ public class SemanticQueryService {
         List.of(),
         List.of(
             new ValidationIssue(
-                exception.code().name(), "ERROR", exception.getMessage(), path, null)),
+                exception.code().name(),
+                "ERROR",
+                exception.getMessage(),
+                path,
+                null,
+                exception.details(),
+                exception.suggestions())),
         null,
         traceId);
   }
@@ -814,16 +979,39 @@ public class SemanticQueryService {
     return value;
   }
 
-  private String dimensionExpression(ResolvedDimension dimension) {
-    String reference = memberReference(dimension.object(), dimension.dimension());
-    return dimension.granularity() == null
-        ? reference
-        : "DATE_TRUNC('" + dimension.granularity().wire() + "', " + reference + ")";
+  private String dimensionExpression(
+      SemanticModel model, ResolvedDimension dimension, String timezone) {
+    String reference = memberReference(model, dimension.object(), dimension.dimension());
+    if (dimension.granularity() == null) return reference;
+    String truncated =
+        "DATE_TRUNC('" + dimension.granularity().wire() + "', " + reference + ")";
+    if ("UTC".equals(timezone)
+        || !normalizeType(dimension.dimension().type()).equals("timestamp")) return truncated;
+    String zone = timezone.replace("'", "''");
+    return "CAST(DATE_TRUNC('"
+        + dimension.granularity().wire()
+        + "', AT_TIMEZONE(WITH_TIMEZONE("
+        + reference
+        + ", 'UTC'), '"
+        + zone
+        + "')) AS timestamp)";
   }
 
   private String memberReference(
-      SemanticModel.SemanticObject object, SemanticModel.Dimension dimension) {
-    return object.metadata().name() + "." + dimension.name();
+      SemanticModel model,
+      SemanticModel.SemanticObject object,
+      SemanticModel.Dimension dimension) {
+    return objectAlias(model, object) + "." + dimension.name();
+  }
+
+  private String objectAlias(SemanticModel model, SemanticModel.SemanticObject object) {
+    return objectAlias(model.objectId(object));
+  }
+
+  private String objectAlias(String objectId) {
+    int separator = objectId.indexOf('.');
+    String domain = objectId.substring(0, separator);
+    return "o_" + domain.length() + "_" + domain + "_" + objectId.substring(separator + 1);
   }
 
   private String joinKeyword(SemanticModel.JoinType type) {
@@ -922,6 +1110,14 @@ public class SemanticQueryService {
   private record JoinStep(
       String fromObject, String toObject, SemanticRelationshipGraph.Edge edge) {}
 
+  private record ResolvedJoinPaths(
+      Map<String, List<SemanticRelationshipGraph.Edge>> paths,
+      List<SemanticQuery.JoinPath> normalized) {}
+
+  private record JoinResolution(
+      List<JoinStep> joins,
+      Map<String, List<SemanticRelationshipGraph.Edge>> paths) {}
+
   private record ExtraCondition(String sql, List<Object> parameters) {}
 
   private record PlanOptions(
@@ -946,7 +1142,13 @@ public class SemanticQueryService {
       List<String> warnings) {}
 
   public record ValidationIssue(
-      String code, String severity, String message, String path, String member) {}
+      String code,
+      String severity,
+      String message,
+      String path,
+      String member,
+      Map<String, Object> details,
+      List<String> suggestions) {}
 
   public record QueryPlan(
       List<String> metrics,

@@ -33,10 +33,10 @@ public class ApiExceptionHandler {
           request.getRequestURI(),
           e);
     String message =
-        serverError
-            ? "Internal server error"
-            : e instanceof ResponseStatusException response
-                ? response.getReason()
+        e instanceof ResponseStatusException response
+            ? response.getReason()
+            : serverError
+                ? "Internal server error"
                 : Objects.toString(e.getMessage(), status.getReasonPhrase());
     return ResponseEntity.status(status)
         .body(

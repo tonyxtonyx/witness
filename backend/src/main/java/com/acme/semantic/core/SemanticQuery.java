@@ -9,14 +9,32 @@ public record SemanticQuery(
     FilterGroup filters,
     List<OrderBy> orderBy,
     Integer limit,
-    String timezone) {
+    String timezone,
+    List<JoinPath> joinPaths) {
   public SemanticQuery {
     metrics = metrics == null ? List.of() : List.copyOf(metrics);
     dimensions = dimensions == null ? List.of() : List.copyOf(dimensions);
     orderBy = orderBy == null ? List.of() : List.copyOf(orderBy);
+    joinPaths = joinPaths == null ? List.of() : List.copyOf(joinPaths);
+  }
+
+  public SemanticQuery(
+      List<String> metrics,
+      List<DimensionSelection> dimensions,
+      FilterGroup filters,
+      List<OrderBy> orderBy,
+      Integer limit,
+      String timezone) {
+    this(metrics, dimensions, filters, orderBy, limit, timezone, List.of());
   }
 
   public record DimensionSelection(String id, TimeGranularity granularity) {}
+
+  public record JoinPath(String to, List<String> via) {
+    public JoinPath {
+      via = via == null ? List.of() : List.copyOf(via);
+    }
+  }
 
   public record FilterGroup(LogicalOperator operator, List<FilterCondition> conditions) {
     public FilterGroup {

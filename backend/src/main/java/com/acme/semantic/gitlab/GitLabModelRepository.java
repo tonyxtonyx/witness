@@ -130,9 +130,16 @@ public class GitLabModelRepository implements ModelRepository {
   @SuppressWarnings("unchecked")
   @Override
   public ChangeResult createMergeRequest(ChangeSet changeSet) {
-    ModelRevision latest = loadDefaultRevision();
-    if (!Objects.equals(latest.revision(), changeSet.baseRevision()))
+    String latestRevision = currentRevision();
+    if (!Objects.equals(latestRevision, changeSet.baseRevision()))
       throw new RevisionConflictException("Default branch changed; rebuild the diff");
+    Set<String> existingPaths = new HashSet<>();
+    for (Map<String, Object> node : loadCompleteTree(latestRevision)) {
+      if (!"blob".equals(node.get("type"))) continue;
+      String full = String.valueOf(node.get("path"));
+      String prefix = config.modelPath() + "/";
+      if (full.startsWith(prefix)) existingPaths.add(full.substring(prefix.length()));
+    }
     String suffix = UUID.randomUUID().toString().substring(0, 8);
     String slug =
         changeSet
@@ -152,7 +159,7 @@ public class GitLabModelRepository implements ModelRepository {
                 uriBuilder
                     .path("/projects/{project}/repository/branches")
                     .queryParam("branch", branchName)
-                    .queryParam("ref", latest.revision())
+                    .queryParam("ref", latestRevision)
                     .build(config.projectId()))
         .retrieve()
         .toBodilessEntity();
@@ -164,7 +171,7 @@ public class GitLabModelRepository implements ModelRepository {
                 actions.add(
                     Map.of(
                         "action",
-                        latest.files().containsKey(path) ? "update" : "create",
+                        existingPaths.contains(path) ? "update" : "create",
                         "file_path",
                         config.modelPath() + "/" + safePath(path),
                         "content",
@@ -194,6 +201,8 @@ public class GitLabModelRepository implements ModelRepository {
                     actions))
             .retrieve()
             .body(Map.class);
+    if (commit == null || commit.get("id") == null)
+      throw new IllegalStateException("GitLab commit response did not contain an id");
     Map<String, Object> mr =
         client
             .post()
@@ -211,11 +220,13 @@ public class GitLabModelRepository implements ModelRepository {
                     Objects.toString(changeSet.description(), "")))
             .retrieve()
             .body(Map.class);
+    if (mr == null || !(mr.get("iid") instanceof Number iid) || mr.get("web_url") == null)
+      throw new IllegalStateException("GitLab merge request response was incomplete");
     return new ChangeResult(
         branchName,
         String.valueOf(commit.get("id")),
         new ChangeResult.MergeRequest(
-            ((Number) mr.get("iid")).longValue(), String.valueOf(mr.get("web_url"))));
+            iid.longValue(), String.valueOf(mr.get("web_url"))));
   }
 
   private String safePath(String value) {

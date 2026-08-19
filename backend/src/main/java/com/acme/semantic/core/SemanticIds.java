@@ -10,11 +10,11 @@ public final class SemanticIds {
 
   public static String objectId(
       SemanticModel model, SemanticModel.SemanticObject object) {
-    return model.domain(object) + "." + object.metadata().name();
+    return model.objectId(object);
   }
 
   public static String metricId(SemanticModel model, SemanticModel.Metric metric) {
-    return model.domain(metric) + "." + metric.metadata().name();
+    return model.metricId(metric);
   }
 
   public static String dimensionId(
@@ -30,9 +30,8 @@ public final class SemanticIds {
       SemanticPrincipal principal,
       String id) {
     String[] parts = qualified(id, 2, "semantic object");
-    SemanticModel.SemanticObject object = model.objects().get(parts[1]);
+    SemanticModel.SemanticObject object = model.objectById(parts[0] + "." + parts[1]).orElse(null);
     if (object == null
-        || !model.domain(object).equals(parts[0])
         || !policy.canReadObject(principal, model, object)) {
       notFound(id, "semantic object");
     }
@@ -45,9 +44,8 @@ public final class SemanticIds {
       SemanticPrincipal principal,
       String id) {
     String[] parts = qualified(id, 2, "metric");
-    SemanticModel.Metric metric = model.metrics().get(parts[1]);
+    SemanticModel.Metric metric = model.metricById(parts[0] + "." + parts[1]).orElse(null);
     if (metric == null
-        || !model.domain(metric).equals(parts[0])
         || !policy.canReadMetric(principal, model, metric)) {
       notFound(id, "metric");
     }
@@ -77,12 +75,11 @@ public final class SemanticIds {
       String id,
       boolean enforceColumnAccess) {
     String[] parts = qualified(id, 3, "dimension");
-    SemanticModel.SemanticObject object = model.objects().get(parts[1]);
+    SemanticModel.SemanticObject object = model.objectById(parts[0] + "." + parts[1]).orElse(null);
     SemanticModel.Dimension dimension =
         object == null ? null : object.dimension(parts[2]).orElse(null);
     if (object == null
         || dimension == null
-        || !model.domain(object).equals(parts[0])
         || !policy.canReadObject(principal, model, object)
         || (enforceColumnAccess
             && !policy.canReadDimension(principal, model, object, dimension))) {
@@ -99,25 +96,24 @@ public final class SemanticIds {
     List<ResolvedObject> matches = new ArrayList<>();
     String[] parts = id == null ? new String[0] : id.split("\\.", -1);
     if (parts.length == 2) {
-      SemanticModel.SemanticObject object = model.objects().get(parts[1]);
+      SemanticModel.SemanticObject object =
+          model.objectById(parts[0] + "." + parts[1]).orElse(null);
       if (object != null
-          && model.domain(object).equals(parts[0])
           && policy.canReadObject(principal, model, object)) {
         matches.add(new ResolvedObject("semantic_object", object, null, null));
       }
-      SemanticModel.Metric metric = model.metrics().get(parts[1]);
+      SemanticModel.Metric metric = model.metricById(parts[0] + "." + parts[1]).orElse(null);
       if (metric != null
-          && model.domain(metric).equals(parts[0])
           && policy.canReadMetric(principal, model, metric)) {
         matches.add(new ResolvedObject("metric", null, metric, null));
       }
     } else if (parts.length == 3) {
-      SemanticModel.SemanticObject object = model.objects().get(parts[1]);
+      SemanticModel.SemanticObject object =
+          model.objectById(parts[0] + "." + parts[1]).orElse(null);
       SemanticModel.Dimension dimension =
           object == null ? null : object.dimension(parts[2]).orElse(null);
       if (object != null
           && dimension != null
-          && model.domain(object).equals(parts[0])
           && policy.canReadDimension(principal, model, object, dimension)) {
         matches.add(new ResolvedObject("dimension", object, null, dimension));
       }

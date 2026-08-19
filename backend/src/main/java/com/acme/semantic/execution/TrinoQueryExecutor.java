@@ -2,6 +2,7 @@ package com.acme.semantic.execution;
 
 import com.acme.semantic.compiler.CompiledQuery;
 import com.acme.semantic.config.SemanticProperties;
+import io.trino.jdbc.TrinoResultSet;
 import java.sql.*;
 import java.util.*;
 import javax.sql.DataSource;
@@ -50,7 +51,7 @@ public class TrinoQueryExecutor implements QueryExecutor {
           for (int i = 1; i <= md.getColumnCount(); i++) row.add(rs.getObject(i));
           rows.add(row);
         }
-        String queryId = null;
+        String queryId = queryId(rs);
         log.info(
             "semantic query executed correlationId={} elapsedMs={} rows={}",
             query.correlationId(),
@@ -64,5 +65,16 @@ public class TrinoQueryExecutor implements QueryExecutor {
           "Trino execution failed: " + e.getMessage(),
           e);
     }
+  }
+
+  private String queryId(ResultSet resultSet) {
+    try {
+      if (resultSet instanceof TrinoResultSet trino) return trino.getQueryId();
+      if (resultSet.isWrapperFor(TrinoResultSet.class))
+        return resultSet.unwrap(TrinoResultSet.class).getQueryId();
+    } catch (Exception | LinkageError ignored) {
+      // Query IDs are optional for non-Trino drivers and test doubles.
+    }
+    return null;
   }
 }

@@ -8,7 +8,8 @@ management:
   endpoint.health.probes.enabled: true
 semantic:
   model-path: ${MODEL_PATH:semantic-model}
-  api-key: ${REST_API_KEY:dev-secret}
+  api-key: ${REST_API_KEY:}
+  allow-insecure-api-key: ${ALLOW_INSECURE_API_KEY:false}
   pgwire:
     enabled: ${PGWIRE_ENABLED:true}
     port: ${PGWIRE_PORT:5433}

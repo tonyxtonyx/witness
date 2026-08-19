@@ -1,6 +1,7 @@
 package com.acme.semantic.gitlab;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.acme.semantic.config.SemanticProperties;
 import com.acme.semantic.model.ModelParser;
@@ -10,6 +11,8 @@ import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 class ChangeServiceTest {
   @TempDir Path temporaryModel;
@@ -42,7 +45,16 @@ class ChangeServiceTest {
     assertThat(preview.validation().valid()).isTrue();
     assertThat(preview.diff()).contains("+++ /dev/null");
     assertThat(preview.affectedMetrics()).containsExactly("average_order_value");
-    assertThat(service.submit(change).branch())
-        .startsWith("semantic/change/delete-average-order-value-");
+    assertThatThrownBy(() -> service.submit(change))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(
+            error -> {
+              ResponseStatusException response = (ResponseStatusException) error;
+              assertThat(response.getStatusCode().value())
+                  .isEqualTo(HttpStatus.NOT_IMPLEMENTED.value());
+              assertThat(response.getReason())
+                  .contains("requires GitLab mode")
+                  .contains("direct object and metric CRUD endpoints");
+            });
   }
 }
