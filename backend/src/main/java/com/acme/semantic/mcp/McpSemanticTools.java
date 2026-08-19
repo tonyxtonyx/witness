@@ -325,9 +325,8 @@ public class McpSemanticTools {
 
   private SemanticPrincipal principal(McpTransportContext context) {
     Object value = context == null ? null : context.get(PRINCIPAL_CONTEXT_KEY);
-    return value instanceof String id && !id.isBlank()
-        ? SemanticPrincipal.authenticated(id)
-        : SemanticPrincipal.anonymous();
+    if (value instanceof SemanticPrincipal principal) return principal;
+    return SemanticPrincipal.anonymous();
   }
 
   private String traceId(McpTransportContext context) {

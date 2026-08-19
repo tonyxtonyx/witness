@@ -13,12 +13,14 @@ services:
     healthcheck: {test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/info >/dev/null"], interval: 5s, timeout: 3s, retries: 30}
   backend:
     build: .
-    volumes: ["./semantic-model:/app/semantic-model"]
+    volumes: ["./semantic-model:/app/semantic-model", "./data:/app/data"]
     environment:
       MODEL_PATH: /app/semantic-model
       TRINO_JDBC_URL: jdbc:trino://trino:8080/postgres/public
       TRINO_USERNAME: semantic
       REST_API_KEY: ${REST_API_KEY:-dev-secret}
+      WITNESS_JWT_SECRET: ${WITNESS_JWT_SECRET:-demo-witness-jwt-secret-change-me-1234567890}
+      WITNESS_DB_URL: jdbc:h2:file:/app/data/witness;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
       ALLOW_INSECURE_API_KEY: "true"
       MCP_EXPOSE_COMPILED_SQL: "true"
       MCP_EXPOSE_PHYSICAL_LINEAGE: "true"
@@ -30,7 +32,5 @@ services:
     healthcheck: {test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness >/dev/null"], interval: 5s, timeout: 3s, retries: 30}
   frontend:
     build: ./frontend
-    environment:
-      REST_API_KEY: ${REST_API_KEY:-dev-secret}
     ports: ["3000:80"]
     depends_on: {backend: {condition: service_healthy}}

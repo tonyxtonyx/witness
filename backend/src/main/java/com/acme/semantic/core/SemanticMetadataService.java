@@ -121,9 +121,9 @@ public class SemanticMetadataService {
     if (matches.isEmpty()) {
       throw new SemanticException(
           SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
-          "The requested semantic object was not found or is not accessible: " + id,
+          "The requested semantic object was not found or is not accessible",
           false,
-          Map.of("id", Objects.toString(id, "")),
+          Map.of(),
           List.of("Use search_semantic_objects to find accessible semantic IDs"));
     }
     if (matches.size() > 1) {
@@ -152,7 +152,7 @@ public class SemanticMetadataService {
     if (base == null || !policy.canReadObject(principal, model, base)) {
       throw new SemanticException(
           SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
-          "The requested metric was not found or is not accessible: " + metricId);
+          "The requested metric was not found or is not accessible");
     }
     SemanticRelationshipGraph graph = new SemanticRelationshipGraph(model);
     List<CompatibleDimension> compatible = new ArrayList<>();

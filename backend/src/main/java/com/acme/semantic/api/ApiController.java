@@ -9,6 +9,7 @@ import com.acme.semantic.validation.*;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +23,27 @@ public class ApiController {
   private final MetricCrudService metricCrud;
   private final ObjectCrudService objectCrud;
   private final SemanticAccessPolicy policy;
+  private final SemanticResourceAccess access;
+
+  @Autowired
+  public ApiController(
+      SemanticCatalog catalog,
+      ChangeService changes,
+      ModelParser parser,
+      ModelValidator validator,
+      MetricCrudService metricCrud,
+      ObjectCrudService objectCrud,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access) {
+    this.catalog = catalog;
+    this.changes = changes;
+    this.parser = parser;
+    this.validator = validator;
+    this.metricCrud = metricCrud;
+    this.objectCrud = objectCrud;
+    this.policy = policy;
+    this.access = access;
+  }
 
   public ApiController(
       SemanticCatalog catalog,
@@ -31,13 +53,15 @@ public class ApiController {
       MetricCrudService metricCrud,
       ObjectCrudService objectCrud,
       SemanticAccessPolicy policy) {
-    this.catalog = catalog;
-    this.changes = changes;
-    this.parser = parser;
-    this.validator = validator;
-    this.metricCrud = metricCrud;
-    this.objectCrud = objectCrud;
-    this.policy = policy;
+    this(
+        catalog,
+        changes,
+        parser,
+        validator,
+        metricCrud,
+        objectCrud,
+        policy,
+        new SemanticResourceAccess(catalog, policy));
   }
 
   @GetMapping("/objects")
@@ -47,8 +71,10 @@ public class ApiController {
       @RequestParam(required = false) String tag,
       @RequestParam(required = false) String domain,
       HttpServletRequest request) {
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
     boolean physical = canViewPhysical(request);
     return catalog.model().objects().values().stream()
+        .filter(o -> policy.canReadObject(principal, catalog.model(), o))
         .filter(o -> matches(o.metadata(), q, owner, tag))
         .filter(o -> domain == null || domain.equals(catalog.model().domain(o)))
         .map(o -> present(o, physical))
@@ -58,27 +84,32 @@ public class ApiController {
   @GetMapping("/objects/{name}")
   public SemanticModel.SemanticObject object(
       @PathVariable String name, HttpServletRequest request) {
-    var object = ApiModelResolver.object(catalog.model(), name);
+    var object = access.readableObject(ApiSecurityFilter.principal(request), name);
     return present(object, canViewPhysical(request));
   }
 
   @PostMapping("/objects")
   @ResponseStatus(HttpStatus.CREATED)
   public SemanticModel.SemanticObject createObject(
-      @RequestBody ObjectCrudService.ObjectInput input) {
-    return objectCrud.create(input);
+      @RequestBody ObjectCrudService.ObjectInput input, HttpServletRequest request) {
+    return present(
+        objectCrud.create(ApiSecurityFilter.principal(request), input), canViewPhysical(request));
   }
 
   @PutMapping("/objects/{name}")
   public SemanticModel.SemanticObject updateObject(
-      @PathVariable String name, @RequestBody ObjectCrudService.ObjectInput input) {
-    return objectCrud.update(name, input);
+      @PathVariable String name,
+      @RequestBody ObjectCrudService.ObjectInput input,
+      HttpServletRequest request) {
+    return present(
+        objectCrud.update(ApiSecurityFilter.principal(request), name, input),
+        canViewPhysical(request));
   }
 
   @DeleteMapping("/objects/{name}")
   @ResponseStatus(HttpStatus.NO_CONTENT)
-  public void deleteObject(@PathVariable String name) {
-    objectCrud.delete(name);
+  public void deleteObject(@PathVariable String name, HttpServletRequest request) {
+    objectCrud.delete(ApiSecurityFilter.principal(request), name);
   }
 
   @GetMapping("/metrics")
@@ -87,9 +118,15 @@ public class ApiController {
       @RequestParam(required = false) String owner,
       @RequestParam(required = false) String tag,
       @RequestParam(required = false) String object,
-      @RequestParam(required = false) String domain) {
-    SemanticModel.SemanticObject base = object == null ? null : resolveObjectFilter(object);
+      @RequestParam(required = false) String domain,
+      HttpServletRequest request) {
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
+    SemanticModel.SemanticObject base =
+        object == null
+            ? null
+            : access.readableObject(ApiSecurityFilter.principal(request), object);
     return catalog.model().metrics().values().stream()
+        .filter(m -> access.canReadMetric(principal, m))
         .filter(m -> matches(m.metadata(), q, owner, tag))
         .filter(
             m ->
@@ -105,35 +142,46 @@ public class ApiController {
   }
 
   @GetMapping("/metrics/{name}")
-  public SemanticModel.Metric metric(@PathVariable String name) {
-    return present(ApiModelResolver.metric(catalog.model(), name));
+  public SemanticModel.Metric metric(@PathVariable String name, HttpServletRequest request) {
+    return present(access.readableMetric(ApiSecurityFilter.principal(request), name));
   }
 
   @PostMapping("/metrics")
   @ResponseStatus(HttpStatus.CREATED)
-  public SemanticModel.Metric createMetric(@RequestBody MetricCrudService.MetricInput input) {
-    return present(metricCrud.create(input));
+  public SemanticModel.Metric createMetric(
+      @RequestBody MetricCrudService.MetricInput input, HttpServletRequest request) {
+    return present(metricCrud.create(ApiSecurityFilter.principal(request), input));
   }
 
   @PutMapping("/metrics/{name}")
   public SemanticModel.Metric updateMetric(
-      @PathVariable String name, @RequestBody MetricCrudService.MetricInput input) {
-    return present(metricCrud.update(name, input));
+      @PathVariable String name,
+      @RequestBody MetricCrudService.MetricInput input,
+      HttpServletRequest request) {
+    return present(metricCrud.update(ApiSecurityFilter.principal(request), name, input));
   }
 
   @DeleteMapping("/metrics/{name}")
   @ResponseStatus(HttpStatus.NO_CONTENT)
-  public void deleteMetric(@PathVariable String name) {
-    metricCrud.delete(name);
+  public void deleteMetric(@PathVariable String name, HttpServletRequest request) {
+    metricCrud.delete(ApiSecurityFilter.principal(request), name);
   }
 
   @GetMapping("/relationships")
-  public List<RelationshipView> relationships() {
+  public List<RelationshipView> relationships(HttpServletRequest request) {
     SemanticModel model = catalog.model();
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
     return catalog.model().objects().values().stream()
+        .filter(o -> policy.canReadObject(principal, model, o))
         .flatMap(
             o ->
                 o.spec().relationships().stream()
+                    .filter(
+                        r -> {
+                          SemanticModel.SemanticObject target =
+                              model.resolveObject(r.targetObject(), model.domain(o)).value();
+                          return target != null && policy.canReadObject(principal, model, target);
+                        })
                     .map(
                         r ->
                             new RelationshipView(
@@ -151,12 +199,14 @@ public class ApiController {
   }
 
   @GetMapping("/graph")
-  public Graph graph() {
+  public Graph graph(HttpServletRequest request) {
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
     return new Graph(
         catalog.model().objects().values().stream()
+            .filter(o -> policy.canReadObject(principal, catalog.model(), o))
             .map(o -> new Node(catalog.model().objectId(o), o.metadata().label(), o.metadata().tags()))
             .toList(),
-        relationships());
+        relationships(request));
   }
 
   @GetMapping("/model/status")
@@ -165,7 +215,8 @@ public class ApiController {
   }
 
   @PostMapping("/model/reload")
-  public SemanticCatalog.Status reload() {
+  public SemanticCatalog.Status reload(HttpServletRequest request) {
+    requireWrite(request, "*");
     return catalog.reload();
   }
 
@@ -183,12 +234,15 @@ public class ApiController {
   }
 
   @PostMapping("/changes/validate")
-  public ChangeService.Preview validateChanges(@Valid @RequestBody ChangeSet set) {
+  public ChangeService.Preview validateChanges(
+      @Valid @RequestBody ChangeSet set, HttpServletRequest request) {
+    requireChangeWrite(request, set);
     return changes.validate(set);
   }
 
   @PostMapping("/changes/submit")
-  public ChangeResult submit(@Valid @RequestBody ChangeSet set) {
+  public ChangeResult submit(@Valid @RequestBody ChangeSet set, HttpServletRequest request) {
+    requireChangeWrite(request, set);
     return changes.submit(set);
   }
 
@@ -197,12 +251,21 @@ public class ApiController {
     return policy.canViewPhysicalLineage(principal);
   }
 
-  private SemanticModel.SemanticObject resolveObjectFilter(String reference) {
-    SemanticModel.Resolution<SemanticModel.SemanticObject> resolution =
-        catalog.model().resolveObject(reference);
-    if (resolution.ambiguous())
-      throw ApiModelResolver.ambiguous("object", reference, resolution.candidates());
-    return resolution.value();
+  private void requireWrite(HttpServletRequest request, String domain) {
+    policy.requireWriteDomain(ApiSecurityFilter.principal(request), domain);
+  }
+
+  private void requireChangeWrite(HttpServletRequest request, ChangeSet set) {
+    Set<String> paths = new LinkedHashSet<>(set.files().keySet());
+    paths.addAll(set.deletions());
+    if (paths.isEmpty()) {
+      requireWrite(request, "*");
+      return;
+    }
+    for (String path : paths) {
+      String[] parts = path.split("/");
+      requireWrite(request, parts.length >= 2 && parts[0].equals("domains") ? parts[1] : "*");
+    }
   }
 
   private SemanticModel.SemanticObject present(

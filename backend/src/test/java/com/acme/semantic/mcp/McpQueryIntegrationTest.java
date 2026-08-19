@@ -86,7 +86,7 @@ class McpQueryIntegrationTest {
     McpTransportContext context =
         McpTransportContext.create(
             Map.of(
-                McpSemanticTools.PRINCIPAL_CONTEXT_KEY, "test-key",
+                McpSemanticTools.PRINCIPAL_CONTEXT_KEY, SemanticPrincipal.authenticated("test-key"),
                 McpSemanticTools.TRACE_CONTEXT_KEY, "trace-fake-trino"));
 
     McpSchema.CallToolResult result =

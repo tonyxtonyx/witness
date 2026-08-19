@@ -9,6 +9,7 @@ import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.config.SemanticProperties;
 import com.acme.semantic.core.SemanticLineageService;
 import com.acme.semantic.core.SemanticMetadataService;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.core.SemanticQuery;
 import com.acme.semantic.core.SemanticQueryService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,7 +43,7 @@ class McpSemanticToolsContractTest {
         McpTransportContext.create(
             Map.of(
                 McpSemanticTools.PRINCIPAL_CONTEXT_KEY,
-                "test-key",
+                SemanticPrincipal.authenticated("test-key"),
                 McpSemanticTools.TRACE_CONTEXT_KEY,
                 "trace-contract"));
   }

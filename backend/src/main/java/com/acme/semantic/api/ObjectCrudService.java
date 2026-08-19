@@ -1,6 +1,8 @@
 package com.acme.semantic.api;
 
 import com.acme.semantic.catalog.SemanticCatalog;
+import com.acme.semantic.core.SemanticAccessPolicy;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.gitlab.ModelRepository;
 import com.acme.semantic.gitlab.MutableModelRepository;
 import com.acme.semantic.model.ModelParser;
@@ -13,6 +15,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -24,18 +27,55 @@ public class ObjectCrudService {
   private final SemanticCatalog catalog;
   private final ModelParser parser;
   private final ModelValidator validator;
+  private final SemanticAccessPolicy policy;
+  private final SemanticResourceAccess access;
   private final ObjectMapper yaml =
       new ObjectMapper(new YAMLFactory()).setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
+  @Autowired
   public ObjectCrudService(
       ModelRepository repository,
       SemanticCatalog catalog,
       ModelParser parser,
-      ModelValidator validator) {
+      ModelValidator validator,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access) {
     this.repository = repository;
     this.catalog = catalog;
     this.parser = parser;
     this.validator = validator;
+    this.policy = policy;
+    this.access = access;
+  }
+
+  ObjectCrudService(
+      ModelRepository repository,
+      SemanticCatalog catalog,
+      ModelParser parser,
+      ModelValidator validator) {
+    this(repository, catalog, parser, validator, null, null);
+  }
+
+  public synchronized SemanticModel.SemanticObject update(
+      SemanticPrincipal principal, String name, ObjectInput input) {
+    access.writableObject(principal, name);
+    SemanticModel.SemanticObject replacement = normalize(input);
+    requireReadableRelationships(principal, replacement);
+    policy.requireWriteDomain(principal, catalog.model().domain(replacement));
+    return update(name, input);
+  }
+
+  public synchronized SemanticModel.SemanticObject create(
+      SemanticPrincipal principal, ObjectInput input) {
+    SemanticModel.SemanticObject object = normalize(input);
+    requireReadableRelationships(principal, object);
+    policy.requireWriteDomain(principal, catalog.model().domain(object));
+    return create(input);
+  }
+
+  public synchronized void delete(SemanticPrincipal principal, String name) {
+    access.writableObject(principal, name);
+    delete(name);
   }
 
   public synchronized SemanticModel.SemanticObject update(String name, ObjectInput input) {
@@ -69,6 +109,13 @@ public class ObjectCrudService {
 
   private SemanticModel.SemanticObject require(String name) {
     return ApiModelResolver.object(catalog.model(), name);
+  }
+
+  private void requireReadableRelationships(
+      SemanticPrincipal principal, SemanticModel.SemanticObject object) {
+    for (SemanticModel.Relationship relationship : object.spec().relationships())
+      access.readableObject(
+          principal, relationship.targetObject(), catalog.model().domain(object));
   }
 
   private SemanticModel.SemanticObject normalize(ObjectInput input) {

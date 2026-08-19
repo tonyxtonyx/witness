@@ -4,6 +4,8 @@ import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.compiler.*;
 import com.acme.semantic.config.SemanticProperties;
 import com.acme.semantic.core.SemanticAccessPolicy;
+import com.acme.semantic.core.SemanticErrorCode;
+import com.acme.semantic.core.SemanticException;
 import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.execution.*;
 import com.acme.semantic.gitlab.*;
@@ -13,6 +15,7 @@ import java.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 
@@ -27,6 +30,28 @@ public class WorkspaceApiController {
   private final ChangeService changes;
   private final SemanticProperties properties;
   private final SemanticAccessPolicy policy;
+  private final SemanticResourceAccess access;
+  private final SemanticSqlReferenceAuthorizer sqlReferences;
+
+  @Autowired
+  public WorkspaceApiController(
+      SemanticCatalog catalog,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      ChangeService changes,
+      SemanticProperties properties,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access,
+      SemanticSqlReferenceAuthorizer sqlReferences) {
+    this.catalog = catalog;
+    this.compiler = compiler;
+    this.executor = executor;
+    this.changes = changes;
+    this.properties = properties;
+    this.policy = policy;
+    this.access = access;
+    this.sqlReferences = sqlReferences;
+  }
 
   public WorkspaceApiController(
       SemanticCatalog catalog,
@@ -35,28 +60,44 @@ public class WorkspaceApiController {
       ChangeService changes,
       SemanticProperties properties,
       SemanticAccessPolicy policy) {
-    this.catalog = catalog;
-    this.compiler = compiler;
-    this.executor = executor;
-    this.changes = changes;
-    this.properties = properties;
-    this.policy = policy;
+    this(
+        catalog,
+        compiler,
+        executor,
+        changes,
+        properties,
+        policy,
+        new SemanticResourceAccess(catalog, policy),
+        new SemanticSqlReferenceAuthorizer(new SemanticResourceAccess(catalog, policy)));
   }
 
   @GetMapping("/model")
-  public ModelView model() {
+  public ModelView model(HttpServletRequest request) {
     SemanticModel model = catalog.model();
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
+    List<SemanticModel.SemanticObject> readableObjects =
+        model.objects().values().stream()
+            .filter(object -> policy.canReadObject(principal, model, object))
+            .toList();
+    List<SemanticModel.Metric> readableMetrics =
+        model.metrics().values().stream()
+            .filter(metric -> policy.canReadMetric(principal, model, metric))
+            .toList();
     List<DomainView> domains =
         model.domains().stream()
+            .filter(
+                domain ->
+                    readableObjects.stream().anyMatch(o -> model.domain(o).equals(domain))
+                        || readableMetrics.stream().anyMatch(m -> model.domain(m).equals(domain)))
             .map(
                 domain ->
                     new DomainView(
                         domain,
                         humanize(domain),
-                        model.objects().values().stream()
+                        readableObjects.stream()
                             .filter(o -> model.domain(o).equals(domain))
                             .count(),
-                        model.metrics().values().stream()
+                        readableMetrics.stream()
                             .filter(m -> model.domain(m).equals(domain))
                             .count()))
             .toList();
@@ -66,14 +107,27 @@ public class WorkspaceApiController {
         model.loadedAt(),
         properties.gitlab().enabled() ? "governed" : "local",
         domains,
-        model.objects().size(),
-        model.metrics().size(),
-        model.objects().values().stream().mapToLong(o -> o.spec().relationships().size()).sum());
+        readableObjects.size(),
+        readableMetrics.size(),
+        readableObjects.stream()
+            .mapToLong(
+                o ->
+                    o.spec().relationships().stream()
+                        .filter(
+                            relationship -> {
+                              SemanticModel.SemanticObject target =
+                                  model.resolveObject(relationship.targetObject(), model.domain(o)).value();
+                              return target != null
+                                  && policy.canReadObject(principal, model, target);
+                            })
+                        .count())
+            .sum());
   }
 
   @GetMapping("/objects/{name}/source")
   public ObjectSource source(@PathVariable String name, HttpServletRequest request) {
-    SemanticModel.SemanticObject object = ApiModelResolver.object(catalog.model(), name);
+    SemanticModel.SemanticObject object =
+        access.readableObject(ApiSecurityFilter.principal(request), name);
     boolean physical = canViewPhysical(request);
     String yaml = physical ? catalog.source(object.file()) : null;
     var source = object.spec().source();
@@ -93,7 +147,16 @@ public class WorkspaceApiController {
       @RequestBody QueryRequest request, HttpServletRequest httpRequest) {
     long started = System.nanoTime();
     try {
+      SemanticPrincipal principal = ApiSecurityFilter.principal(httpRequest);
+      sqlReferences.requireReadableReferences(principal, request.sql(), catalog.model());
       CompiledQuery compiled = compiler.compile(request.sql(), catalog.model());
+      try {
+        policy.requireQueryDomains(principal, compiled.domains());
+      } catch (SemanticException exception) {
+        if (exception.code() == SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND)
+          throw new SqlCompilationException("42P01", "Unknown semantic object");
+        throw exception;
+      }
       if (compiled.parameters().size() != request.parameters().size())
         return ResponseEntity.badRequest()
             .body(
@@ -133,20 +196,22 @@ public class WorkspaceApiController {
   }
 
   @PostMapping("/validate")
-  public ValidationResponse validate(@RequestBody ValidationRequest request) {
+  public ValidationResponse validate(
+      @RequestBody ValidationRequest request, HttpServletRequest httpRequest) {
     List<FieldIssue> issues = new ArrayList<>();
     if (request.expression() == null || request.expression().isBlank())
       issues.add(new FieldIssue("expression", "REQUIRED", "Expression is required", "ERROR"));
-    SemanticModel.Resolution<SemanticModel.SemanticObject> resolution =
-        catalog.model().resolveObject(request.objectId());
-    SemanticModel.SemanticObject object = resolution.value();
-    if (resolution.ambiguous())
+    SemanticPrincipal principal = ApiSecurityFilter.principal(httpRequest);
+    List<SemanticModel.SemanticObject> visible =
+        access.readableObjects(principal, request.objectId());
+    SemanticModel.SemanticObject object = visible.size() == 1 ? visible.getFirst() : null;
+    if (visible.size() > 1)
       issues.add(
           new FieldIssue(
               "objectId",
               "AMBIGUOUS_OBJECT",
               "Base object is ambiguous; candidates: "
-                  + String.join(", ", resolution.candidates()),
+                  + String.join(", ", visible.stream().map(catalog.model()::objectId).toList()),
               "ERROR"));
     else if (object == null)
       issues.add(
@@ -171,12 +236,15 @@ public class WorkspaceApiController {
       @RequestParam(defaultValue = "") String q,
       @RequestParam(required = false) String type,
       @RequestParam(required = false) String domain,
-      @RequestParam(defaultValue = "false") boolean verifiedOnly) {
+      @RequestParam(defaultValue = "false") boolean verifiedOnly,
+      HttpServletRequest request) {
     String needle = q.toLowerCase(Locale.ROOT);
     SemanticModel model = catalog.model();
+    SemanticPrincipal principal = ApiSecurityFilter.principal(request);
     List<SearchResult> out = new ArrayList<>();
     if (type == null || type.equals("object"))
       for (var object : model.objects().values()) {
+        if (!policy.canReadObject(principal, model, object)) continue;
         boolean verified = verified(object.metadata());
         String objectDomain = model.domain(object);
         if ((domain == null || domain.equals(objectDomain))
@@ -195,6 +263,7 @@ public class WorkspaceApiController {
       }
     if (type == null || type.equals("dimension"))
       for (var object : model.objects().values()) {
+        if (!policy.canReadObject(principal, model, object)) continue;
         String objectDomain = model.domain(object);
         for (var dimension : object.spec().dimensions()) {
           boolean verified =
@@ -227,10 +296,12 @@ public class WorkspaceApiController {
       }
     if (type == null || type.equals("metric"))
       for (var metric : model.metrics().values()) {
+        if (!policy.canReadMetric(principal, model, metric)) continue;
         boolean verified = verified(metric.metadata());
         String metricDomain = model.domain(metric);
         SemanticModel.SemanticObject base =
             model.resolveObject(metric.spec().baseObject(), metricDomain).value();
+        if (base == null || !policy.canReadObject(principal, model, base)) continue;
         if ((domain == null || domain.equals(metricDomain))
             && (!verifiedOnly || verified)
             && matches(metric.metadata(), needle))
@@ -252,8 +323,20 @@ public class WorkspaceApiController {
   }
 
   @PostMapping("/changes")
-  public ChangeResult submit(@RequestBody ChangeSet set) {
+  public ChangeResult submit(@RequestBody ChangeSet set, HttpServletRequest request) {
+    requireChangeWrite(request, set);
     return changes.submit(set);
+  }
+
+  private void requireChangeWrite(HttpServletRequest request, ChangeSet set) {
+    Set<String> paths = new LinkedHashSet<>(set.files().keySet());
+    paths.addAll(set.deletions());
+    if (paths.isEmpty()) paths.add("");
+    for (String path : paths) {
+      String[] parts = path.split("/");
+      String domain = parts.length >= 2 && parts[0].equals("domains") ? parts[1] : "*";
+      policy.requireWriteDomain(ApiSecurityFilter.principal(request), domain);
+    }
   }
 
   private boolean matches(SemanticModel.Metadata metadata, String q) {

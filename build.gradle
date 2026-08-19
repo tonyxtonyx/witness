@@ -23,6 +23,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    implementation 'com.nimbusds:nimbus-jose-jwt:9.40'
+    implementation 'org.springframework.security:spring-security-crypto'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
     implementation 'com.github.jsqlparser:jsqlparser:5.0'
     implementation 'io.trino:trino-jdbc:468'
@@ -31,8 +36,9 @@ dependencies {
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
     implementation 'io.modelcontextprotocol.sdk:mcp-core'
     implementation 'io.modelcontextprotocol.sdk:mcp-json-jackson2'
+    runtimeOnly 'com.h2database:h2'
+    runtimeOnly 'org.postgresql:postgresql:42.7.4'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
-    testImplementation 'org.postgresql:postgresql:42.7.4'
 }
 
 tasks.named('test') { useJUnitPlatform() }

@@ -1,14 +1,15 @@
 package com.acme.semantic.api;
 
-import com.acme.semantic.config.SemanticProperties;
+import com.acme.semantic.auth.AuthenticationService;
 import com.acme.semantic.core.SemanticPrincipal;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.servlet.*;
-import jakarta.servlet.http.*;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.slf4j.MDC;
@@ -24,11 +25,11 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
   public static final String CORRELATION_ATTRIBUTE =
       "com.acme.semantic.correlationId";
 
-  private final SemanticProperties properties;
+  private final AuthenticationService authentication;
   private final ObjectMapper mapper;
 
-  public ApiSecurityFilter(SemanticProperties properties, ObjectMapper mapper) {
-    this.properties = properties;
+  public ApiSecurityFilter(AuthenticationService authentication, ObjectMapper mapper) {
+    this.authentication = authentication;
     this.mapper = mapper;
   }
 
@@ -43,20 +44,19 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
     request.setAttribute(CORRELATION_ATTRIBUTE, correlation);
     MDC.put("correlationId", correlation);
     try {
+      Optional<SemanticPrincipal> principal = resolve(request);
+      principal.ifPresent(value -> request.setAttribute(PRINCIPAL_ATTRIBUTE, value));
       if (request.getRequestURI().startsWith("/api/")
-          && !secureEquals(properties.apiKey(), request.getHeader("X-API-Key"))) {
-        response.setStatus(401);
-        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        mapper.writeValue(
-            response.getWriter(),
-            Map.of(
-                "code", "UNAUTHORIZED",
-                "message", "Missing or invalid X-API-Key",
-                "correlationId", correlation));
+          && !publicPath(request.getRequestURI())
+          && principal.isEmpty()) {
+        unauthorized(response, correlation);
         return;
       }
-      if (request.getRequestURI().startsWith("/api/")) {
-        request.setAttribute(PRINCIPAL_ATTRIBUTE, "api-key");
+      if (request.getRequestURI().startsWith("/api/v1/admin/")
+          && principal.isPresent()
+          && !principal.get().admin()) {
+        forbidden(response, correlation);
+        return;
       }
       chain.doFilter(request, response);
     } finally {
@@ -72,9 +72,39 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
         : SemanticPrincipal.authenticated(identity.toString());
   }
 
-  private boolean secureEquals(String expected, String supplied) {
-    if (expected == null || expected.isBlank() || supplied == null) return false;
-    return MessageDigest.isEqual(
-        expected.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
+  private Optional<SemanticPrincipal> resolve(HttpServletRequest request) {
+    String authorization = request.getHeader("Authorization");
+    if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
+      Optional<SemanticPrincipal> principal =
+          authentication.authenticateAccessToken(authorization.substring(7).trim());
+      if (principal.isPresent()) return principal;
+    }
+    return authentication.authenticateApiKey(request.getHeader("X-API-Key"));
+  }
+
+  private boolean publicPath(String path) {
+    return path.startsWith("/api/v1/auth/") || path.startsWith("/actuator/health");
+  }
+
+  private void unauthorized(HttpServletResponse response, String correlation) throws IOException {
+    response.setStatus(401);
+    response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+    mapper.writeValue(
+        response.getWriter(),
+        Map.of(
+            "code", "UNAUTHORIZED",
+            "message", "Missing or invalid credentials",
+            "correlationId", correlation));
+  }
+
+  private void forbidden(HttpServletResponse response, String correlation) throws IOException {
+    response.setStatus(403);
+    response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+    mapper.writeValue(
+        response.getWriter(),
+        Map.of(
+            "code", "FORBIDDEN",
+            "message", "Access denied",
+            "correlationId", correlation));
   }
 }

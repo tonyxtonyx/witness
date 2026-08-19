@@ -5,6 +5,9 @@ import App from './App';
 
 const object={version:1,kind:'object',metadata:{name:'orders',domain:'retail',label:'Orders',description:'Customer orders',owner:'analytics',tags:['sales']},spec:{source:{catalog:'postgres',schema:'public',table:'orders'},primaryKey:['order_id'],dimensions:[{name:'order_id',type:'bigint',sql:'order_id',nullable:false}],relationships:[]},file:'objects/orders.yaml'};
 const model={name:'demo',revision:'1234567890abcdef',loadedAt:'2026-08-05T00:00:00Z',governanceMode:'local',domains:[{key:'retail',label:'Retail',objectCount:1,metricCount:0}],objectCount:1,metricCount:0,relationshipCount:0};
+const authUser={username:'admin',displayName:'Admin User',roles:['admin'],admin:true,mustChangePassword:false,domainPermissions:{},capabilities:[]};
+const session={accessToken:'test-access-token',refreshToken:'ignored-by-spa',expiresIn:3600,tokenType:'Bearer',user:authUser};
+const ok=(body:unknown,status=200)=>({ok:true,status,json:async()=>body} as Response);
 
 afterEach(()=>cleanup());
 
@@ -14,6 +17,7 @@ describe('catalog',()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
       expect(new Headers(init?.headers).has('X-API-Key')).toBe(false);
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/model')?model:url.endsWith('/objects')?[object]:url.endsWith('/metrics')?[]:[];
       return {ok:true,status:200,json:async()=>body} as Response;
     }));
@@ -48,6 +52,7 @@ describe('object builder',()=>{
     };
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/model')?governedModel
         :url.endsWith('/objects/retail.orders/source')?source
         :url.endsWith('/objects/retail.orders')?object
@@ -91,6 +96,7 @@ describe('metric builder',()=>{
   it('exposes a Create metric action in the metric registry',async()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/model')?model:url.endsWith('/metrics')?[]:[];
       return {ok:true,status:200,json:async()=>body} as Response;
     }));
@@ -104,6 +110,7 @@ describe('metric builder',()=>{
   it('requires selecting an existing base object before opening the metric form',async()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/model')?model
         :url.endsWith('/objects/retail.orders')?object
         :url.endsWith('/objects')?[object]
@@ -129,6 +136,7 @@ describe('metric builder',()=>{
   it('renders generated YAML beside the visual metric form',async()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/model')?model
         :url.endsWith('/objects/retail.orders')?object
         :[];
@@ -155,6 +163,7 @@ describe('governance redaction',()=>{
     const redactedSource={file:'objects/orders.yaml',fields:[{dimension:'order_id',expression:'order_id'}]};
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/objects/retail.orders/source')?redactedSource
         :url.endsWith('/objects/retail.orders')?redactedObject
         :url.endsWith('/metrics')?[]
@@ -172,6 +181,7 @@ describe('governance redaction',()=>{
   it('shows a policy state when compiled SQL is omitted',async()=>{
     vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
       const url=String(input);
+      if(url.endsWith('/auth/refresh'))return ok(session);
       const body=url.endsWith('/objects')?[object]
         :url.endsWith('/metrics')?[]
         :url.endsWith('/query')?{columns:[],rows:[],rowCount:0,elapsedMs:1,queryId:'query-1'}

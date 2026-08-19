@@ -153,9 +153,9 @@ public final class SemanticIds {
   private static void notFound(String id, String kind) {
     throw new SemanticException(
         SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
-        "The requested " + kind + " was not found or is not accessible: " + id,
+        "The requested " + kind + " was not found or is not accessible",
         false,
-        java.util.Map.of("id", id),
+        java.util.Map.of(),
         List.of("Use search_semantic_objects to find accessible semantic IDs"));
   }
 

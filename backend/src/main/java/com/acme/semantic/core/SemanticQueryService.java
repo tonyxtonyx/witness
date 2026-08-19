@@ -221,6 +221,15 @@ public class SemanticQueryService {
         resolveExplicitJoinPaths(principal, model, graph, base, targets, query.joinPaths());
     JoinResolution joinResolution =
         resolveJoins(principal, model, graph, base, targets, explicitPaths.paths());
+    LinkedHashSet<String> queryDomains = new LinkedHashSet<>();
+    targets.forEach(target -> queryDomains.add(model.domain(target)));
+    queryDomains.add(model.domain(base));
+    joinResolution.joins().forEach(
+        join -> {
+          model.objectById(join.fromObject()).ifPresent(object -> queryDomains.add(model.domain(object)));
+          model.objectById(join.toObject()).ifPresent(object -> queryDomains.add(model.domain(object)));
+        });
+    policy.requireQueryDomains(principal, queryDomains);
     validateMetricCompatibility(
         model,
         graph,
@@ -336,7 +345,7 @@ public class SemanticQueryService {
       if (object == null || !policy.canReadObject(principal, model, object)) {
         throw new SemanticException(
             SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND,
-            "Metric was not found or is not accessible: " + id);
+            "Metric was not found or is not accessible");
       }
       result.add(new ResolvedMetric(id, metric, object));
     }

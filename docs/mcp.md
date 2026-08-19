@@ -14,7 +14,7 @@ protocol `2025-11-25`. Tool contracts are additive and do not depend on an MCP s
 ```mermaid
 flowchart TD
     CLIENT["MCP client"]
-    TRANSPORT["Stateless Streamable HTTP<br/>API key + Origin validation"]
+    TRANSPORT["Stateless Streamable HTTP<br/>Bearer/API key + Origin validation"]
     TOOLS["Seven MCP tool adapters<br/>schema + DTO mapping + audit"]
     CORE["Semantic Core"]
     META["Metadata catalog + stable IDs"]
@@ -50,6 +50,10 @@ Transport: Streamable HTTP
 Header: X-API-Key: dev-secret
 Protocol version: 2025-11-25
 ```
+
+MCP also accepts `Authorization: Bearer <access-token>` from `/api/v1/auth/login`. API keys are
+resolved as database-backed service accounts; bearer tokens are resolved as users. Both transports
+therefore receive the same role and domain-grant enforcement.
 
 A low-level initialization request looks like this:
 
@@ -436,7 +440,12 @@ not-found response as missing IDs.
 
 ## Authentication, authorization, and audit
 
-- `X-API-Key` is verified on every HTTP request with constant-time comparison.
+- REST and MCP requests accept a Witness JWT bearer token or the named compatibility service account
+  represented by `semantic.api-key`. Service-account keys are stored as indexed
+  `HMAC-SHA256(WITNESS_JWT_SECRET, key)` digests; one lookup and a constant-time digest comparison
+  are performed per request. Human passwords remain BCrypt-hashed. Because the JWT secret is also
+  the API-key pepper, changing it invalidates existing service-account digests; rotate those keys
+  after a planned secret change.
 - If `Origin` is present, its authority must equal `Host` to prevent DNS rebinding.
 - The transport creates the `SemanticPrincipal`; no tool schema accepts `user`, `role`, `tenant`,
   credentials, or connection properties.
@@ -447,13 +456,26 @@ not-found response as missing IDs.
   and hidden member IDs are not returned to the MCP caller.
 - Tool audit logs contain principal, tool, semantic revision, duration, status, trace ID, and query
   ID. Arguments, SQL parameters, and result rows are never written to the audit log.
-- Compiled SQL and physical lineage are disabled by default.
+- Compiled SQL and physical lineage require their corresponding role capability and remain disabled
+  by default. The existing server flags are additional deployment-wide kill switches: both the
+  capability and the enabled flag are required.
 
-The current default policy represents the repository's existing single API-key security model and
-grants that authenticated principal catalog-wide read access. YAML schema v1 does not yet define
-row-level or column-level policy documents, so the default policy supplies no automatic filters. A
-production deployment can replace `DefaultSemanticAccessPolicy` and use the existing Core policy
-hooks without changing any of the seven tool contracts.
+The indexed API-key migration re-derives the `semantic-api-key` bootstrap account from the
+configured `semantic.api-key`. Other service accounts created before this format are exposed with
+`requiresRotation: true`, rejected for authentication, and named in a startup warning until an
+administrator rotates them. Their unrecoverable BCrypt hashes are never treated as HMAC digests.
+
+The default policy resolves READ, QUERY, and WRITE grants per semantic domain from the trusted
+transport principal. A `*` grant covers every domain and administrator roles short-circuit all
+checks. YAML schema v1 does not yet define row-level or column-level policy documents, so the
+default policy supplies no automatic filters.
+
+The browser uses the same bearer-token path but never persists either token in web storage. Access
+tokens live only in SPA memory. Login and refresh also set the refresh token in an `HttpOnly`,
+`SameSite=Strict`, `/api/v1/auth` cookie (`Secure` over HTTPS), and logout clears it. Only POST
+`/api/v1/auth/refresh` and POST `/api/v1/auth/logout` may authenticate from that cookie; all catalog,
+query, mutation, admin, and MCP requests require an explicit bearer or service-account header.
+`SameSite=Strict` is the CSRF control for those two cookie-authenticated endpoints.
 
 ## Limits and timeouts
 

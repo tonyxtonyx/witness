@@ -1,7 +1,9 @@
 package com.acme.semantic.mcp;
 
 import com.acme.semantic.api.ApiSecurityFilter;
+import com.acme.semantic.auth.AuthenticationService;
 import com.acme.semantic.config.SemanticProperties;
+import com.acme.semantic.core.SemanticPrincipal;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
@@ -28,10 +30,10 @@ public class McpServerConfiguration {
 
   @Bean
   HttpServletStatelessServerTransport mcpTransport(
-      SemanticProperties properties, McpJsonMapper mapper) {
+      SemanticProperties properties, McpJsonMapper mapper, AuthenticationService authentication) {
     SemanticProperties.Mcp config =
         properties.mcp() == null ? SemanticProperties.Mcp.defaults() : properties.mcp();
-    McpTransportSecurity security = new McpTransportSecurity(properties);
+    McpTransportSecurity security = new McpTransportSecurity(authentication);
     return HttpServletStatelessServerTransport.builder()
         .jsonMapper(mapper)
         .messageEndpoint(config.endpoint())
@@ -41,12 +43,15 @@ public class McpServerConfiguration {
               Map<String, Object> values = new LinkedHashMap<>();
               Object principal = request.getAttribute(ApiSecurityFilter.PRINCIPAL_ATTRIBUTE);
               Object trace = request.getAttribute(ApiSecurityFilter.CORRELATION_ATTRIBUTE);
-              if (principal == null && security.authenticated(request.getHeader("X-API-Key"))) {
-                principal = "api-key";
-              }
+              if (!(principal instanceof SemanticPrincipal))
+                principal =
+                    security
+                        .authenticate(
+                            request.getHeader("Authorization"), request.getHeader("X-API-Key"))
+                        .orElse(null);
               if (trace == null) trace = UUID.randomUUID().toString();
               if (principal != null) {
-                values.put(McpSemanticTools.PRINCIPAL_CONTEXT_KEY, principal.toString());
+                values.put(McpSemanticTools.PRINCIPAL_CONTEXT_KEY, principal);
               }
               if (trace != null) values.put(McpSemanticTools.TRACE_CONTEXT_KEY, trace.toString());
               return McpTransportContext.create(Map.copyOf(values));

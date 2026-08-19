@@ -1,0 +1,26 @@
+---
+version: 1
+kind: "object"
+metadata:
+  name: "asfsafsa"
+  domain: "retail"
+  label: "fsafsa"
+  description: "sfaafas"
+  owner: "fsaf"
+  tags: []
+  aliases: []
+spec:
+  source:
+    catalog: "postgres"
+    schema: "public"
+    table: "asfsafsa"
+  primaryKey:
+  - "field_1"
+  dimensions:
+  - name: "field_1"
+    label: ""
+    description: ""
+    type: "varchar"
+    sql: "field_1"
+    nullable: true
+  relationships: []

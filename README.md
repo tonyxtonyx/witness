@@ -150,6 +150,20 @@ Docker starts the complete data path:
 
 The demo database is initialized from [`demo-data/init.sql`](demo-data/init.sql) with customers, products, orders, and AI experiments.
 
+### Sign in and administer access
+
+Open the web UI and sign in with `admin` / `admin` on a fresh database. Witness deliberately
+allows this bootstrap credential by default so the first administrator can get in, logs a prominent
+startup warning while it is unchanged, and immediately requires the password to be changed before
+the rest of the application can be used. Set `WITNESS_ALLOW_DEFAULT_ADMIN=false` to refuse startup
+instead when the default password is still present.
+
+After changing the password, use **Admin** to manage local users, roles, domain grants, capabilities,
+and service accounts. A role grants `READ`, `QUERY`, and `WRITE` independently per domain; domain
+`*` applies to every domain. Administrator roles imply all permissions. Compiled SQL and physical
+lineage are separate global capabilities and are still subject to their deployment-wide feature
+switches. The server remains the authorization authority: UI action gating is only a usability hint.
+
 ### Run the complete GitLab-governed demo
 
 The regular quick start uses local filesystem governance. To demonstrate the complete
@@ -498,11 +512,17 @@ When `GITLAB_ENABLED=false`, no real GitLab connection is made. Development uses
 
 ## REST API
 
-All `/api/v1/**` endpoints currently require:
+Interactive users authenticate with `POST /api/v1/auth/login` and send the returned access token as
+`Authorization: Bearer <token>`. Named service accounts may instead send `X-API-Key`; the bootstrap
+`REST_API_KEY` remains available for MCP clients and scripts, but the browser proxy no longer
+injects it. Auth login, refresh, and logout plus actuator health are public transport endpoints;
+application data remains authenticated.
 
-```text
-X-API-Key: dev-secret
-```
+The SPA keeps its short-lived access token in memory only. Its refresh token is stored in an
+`HttpOnly`, `SameSite=Strict`, auth-path-scoped cookie, never in local or session storage. Only the
+POST-only `/auth/refresh` and `/auth/logout` endpoints accept that cookie; every other protected
+endpoint requires the bearer header. HTTPS requests receive a `Secure` cookie. A hard reload uses
+the cookie to restore the session, and logout revokes the refresh token and clears the cookie.
 
 Key endpoint groups:
 
@@ -515,6 +535,8 @@ Key endpoint groups:
 | Query | `POST /query`, `POST /validate` |
 | Discovery | `GET /relationships`, `/graph`, `/search`, `/objects/{name}/source` |
 | Governance | `POST /changes/validate`, `/changes/submit` |
+| Authentication | `POST /auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/password`; `GET /auth/me` |
+| Administration | User, role/grant/capability, and service-account CRUD under `/admin/**` |
 
 Errors include a correlation ID. Unexpected server failures are logged internally while clients receive a generic response.
 
@@ -531,9 +553,10 @@ publishes exactly seven read-only discovery and analytical tools:
 6. `query_metrics`
 7. `get_lineage`
 
-Every request uses `X-API-Key`, stable domain-qualified IDs, the active semantic revision, and the
-same catalog, compiler, relationship rules, limits, and Trino executor as the rest of Witness. Raw
-SQL and caller-supplied identities are not part of the MCP contract. See the complete
+Every request uses either a user bearer token or a named service-account `X-API-Key`, stable
+domain-qualified IDs, the active semantic revision, and the same catalog, compiler, relationship
+rules, limits, and Trino executor as the rest of Witness. Raw SQL and caller-supplied identities are
+not part of the MCP contract. See the complete
 [MCP architecture, contracts, examples, security model, and limitations](docs/mcp.md).
 
 ## Configuration
@@ -541,7 +564,12 @@ SQL and caller-supplied identities are not part of the MCP contract. See the com
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `MODEL_PATH` | `semantic-model` | Local semantic YAML directory |
-| `REST_API_KEY` | `dev-secret` | Development REST authentication |
+| `REST_API_KEY` | `dev-secret` | Bootstrap service-account key for MCP and scripts |
+| `WITNESS_JWT_SECRET` | none | JWT signing secret and default API-key pepper (minimum 32 bytes) |
+| `WITNESS_DB_URL` | `jdbc:h2:file:./data/witness...` | Identity database JDBC URL |
+| `WITNESS_ALLOW_DEFAULT_ADMIN` | `true` | Permit startup while the seeded admin password is unchanged |
+| `WITNESS_ACCESS_TOKEN_MINUTES` | `60` | Access-token lifetime |
+| `WITNESS_REFRESH_TOKEN_DAYS` | `30` | Refresh-token lifetime |
 | `PGWIRE_PORT` | `5433` | pgwire port inside the backend container |
 | `PGWIRE_HOST_PORT` | `55433` | Published Docker host port |
 | `PGWIRE_USERNAME` | `semantic` | SQL username |
@@ -637,8 +665,8 @@ If polling, parsing, or validation fails, the previous valid revision remains ac
 
 This repository is a working vertical MVP, not a production-ready database server.
 
-- REST authentication uses one development API key; production OIDC, RBAC, and attributable audit events are not implemented yet.
-- MCP has per-tool audit events, but uses the same single API-key principal until production OIDC/RBAC is introduced.
+- Local users, JWT sessions, domain RBAC, admin management, and named MCP/REST service accounts are implemented; LDAP and external OIDC providers are not yet implemented.
+- Admin mutations and MCP tool calls emit structured audit logs, but an append-only audit store is not yet implemented.
 - YAML schema v1 does not model row/column policies, freshness SLAs, currency conversion, or source timezones; timestamp sources are assumed to be UTC, while Semantic Core exposes typed production policy hooks.
 - The UI's current “verified” badge is inferred from owner and description; it is not a persisted certification workflow.
 - pgwire uses cleartext password authentication and no TLS; keep it local or behind trusted TLS termination.
@@ -649,7 +677,7 @@ This repository is a working vertical MVP, not a production-ready database serve
 
 ## Roadmap
 
-- [ ] OIDC authentication and role-based authorization
+- [ ] LDAP and OIDC identity providers
 - [ ] Append-only audit store for changes, approvals, and model activation
 - [ ] Explicit metric certification tied to definition hash and revision
 - [ ] Fan-out-safe pre-aggregation and symmetric aggregates

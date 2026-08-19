@@ -2,13 +2,24 @@ package com.acme.semantic.config;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 @Configuration
-@EnableConfigurationProperties(SemanticProperties.class)
+@EnableConfigurationProperties({SemanticProperties.class, WitnessAuthProperties.class})
 public class AppConfig {
+  @Bean(name = "dataSource", destroyMethod = "close")
+  @Primary
+  HikariDataSource identityDataSource(DataSourceProperties properties) {
+    HikariDataSource dataSource =
+        properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+    dataSource.setPoolName("witness-identity");
+    return dataSource;
+  }
+
   @Bean(name = "trinoDataSource", destroyMethod = "close")
   HikariDataSource trinoDataSource(SemanticProperties properties) {
     SemanticProperties.Trino trino = properties.trino();

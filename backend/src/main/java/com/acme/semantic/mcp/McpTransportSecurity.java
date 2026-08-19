@@ -1,27 +1,26 @@
 package com.acme.semantic.mcp;
 
-import com.acme.semantic.config.SemanticProperties;
+import com.acme.semantic.auth.AuthenticationService;
+import com.acme.semantic.core.SemanticPrincipal;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityException;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityValidator;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 final class McpTransportSecurity implements ServerTransportSecurityValidator {
-  private final String apiKey;
+  private final AuthenticationService authentication;
 
-  McpTransportSecurity(SemanticProperties properties) {
-    this.apiKey = properties.apiKey();
+  McpTransportSecurity(AuthenticationService authentication) {
+    this.authentication = authentication;
   }
 
   @Override
   public void validateHeaders(Map<String, List<String>> headers)
       throws ServerTransportSecurityException {
-    String suppliedKey = first(headers, "X-API-Key");
-    if (!secureEquals(apiKey, suppliedKey)) {
-      throw new ServerTransportSecurityException(401, "Missing or invalid MCP API key");
+    if (authenticate(headers).isEmpty()) {
+      throw new ServerTransportSecurityException(401, "Missing or invalid MCP credentials");
     }
     String origin = first(headers, "Origin");
     if (origin == null || origin.isBlank()) return;
@@ -38,6 +37,19 @@ final class McpTransportSecurity implements ServerTransportSecurityValidator {
     }
   }
 
+  Optional<SemanticPrincipal> authenticate(Map<String, List<String>> headers) {
+    return authenticate(first(headers, "Authorization"), first(headers, "X-API-Key"));
+  }
+
+  Optional<SemanticPrincipal> authenticate(String authorization, String apiKey) {
+    if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
+      Optional<SemanticPrincipal> principal =
+          authentication.authenticateAccessToken(authorization.substring(7).trim());
+      if (principal.isPresent()) return principal;
+    }
+    return authentication.authenticateApiKey(apiKey);
+  }
+
   private String first(Map<String, List<String>> headers, String name) {
     return headers.entrySet().stream()
         .filter(entry -> entry.getKey().equalsIgnoreCase(name))
@@ -46,15 +58,5 @@ final class McpTransportSecurity implements ServerTransportSecurityValidator {
         .map(List::getFirst)
         .findFirst()
         .orElse(null);
-  }
-
-  private boolean secureEquals(String expected, String supplied) {
-    if (expected == null || supplied == null) return false;
-    return MessageDigest.isEqual(
-        expected.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
-  }
-
-  boolean authenticated(String supplied) {
-    return secureEquals(apiKey, supplied);
   }
 }

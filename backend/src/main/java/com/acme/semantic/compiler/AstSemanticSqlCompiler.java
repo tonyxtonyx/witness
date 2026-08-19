@@ -192,7 +192,13 @@ public class AstSemanticSqlCompiler implements SemanticSqlCompiler {
     out.append(" LIMIT ").append(Math.min(requested, 10_000));
     validateFanout(context);
     return new CompiledQuery(
-        out.toString(), context.parameters, columns, UUID.randomUUID().toString());
+        out.toString(),
+        context.parameters,
+        columns,
+        UUID.randomUUID().toString(),
+        context.objects.values().stream()
+            .map(context.model::domain)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
   }
 
   private String expression(Expression e, Context c, Usage usage) {

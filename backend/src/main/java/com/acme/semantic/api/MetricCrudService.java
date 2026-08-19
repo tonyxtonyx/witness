@@ -1,6 +1,8 @@
 package com.acme.semantic.api;
 
 import com.acme.semantic.catalog.SemanticCatalog;
+import com.acme.semantic.core.SemanticAccessPolicy;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.gitlab.ModelRepository;
 import com.acme.semantic.gitlab.MutableModelRepository;
 import com.acme.semantic.model.*;
@@ -9,6 +11,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -20,18 +23,63 @@ public class MetricCrudService {
   private final SemanticCatalog catalog;
   private final ModelParser parser;
   private final ModelValidator validator;
+  private final SemanticAccessPolicy policy;
+  private final SemanticResourceAccess access;
   private final ObjectMapper yaml =
       new ObjectMapper(new YAMLFactory()).setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
+  @Autowired
   public MetricCrudService(
       ModelRepository repository,
       SemanticCatalog catalog,
       ModelParser parser,
-      ModelValidator validator) {
+      ModelValidator validator,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access) {
     this.repository = repository;
     this.catalog = catalog;
     this.parser = parser;
     this.validator = validator;
+    this.policy = policy;
+    this.access = access;
+  }
+
+  MetricCrudService(
+      ModelRepository repository,
+      SemanticCatalog catalog,
+      ModelParser parser,
+      ModelValidator validator) {
+    this(repository, catalog, parser, validator, null, null);
+  }
+
+  public synchronized SemanticModel.Metric create(
+      SemanticPrincipal principal, MetricInput input) {
+    if (input != null && input.spec() != null)
+      access.readableObject(
+          principal,
+          input.spec().baseObject(),
+          input.metadata() == null ? null : input.metadata().domain());
+    SemanticModel.Metric metric = normalize(input);
+    policy.requireWriteDomain(principal, catalog.model().domain(metric));
+    return create(input);
+  }
+
+  public synchronized SemanticModel.Metric update(
+      SemanticPrincipal principal, String name, MetricInput input) {
+    access.writableMetric(principal, name);
+    if (input != null && input.spec() != null)
+      access.readableObject(
+          principal,
+          input.spec().baseObject(),
+          input.metadata() == null ? null : input.metadata().domain());
+    SemanticModel.Metric replacement = normalize(input);
+    policy.requireWriteDomain(principal, catalog.model().domain(replacement));
+    return update(name, input);
+  }
+
+  public synchronized void delete(SemanticPrincipal principal, String name) {
+    access.writableMetric(principal, name);
+    delete(name);
   }
 
   public synchronized SemanticModel.Metric create(MetricInput input) {

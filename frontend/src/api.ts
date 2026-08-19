@@ -15,10 +15,53 @@ export type ValidationResponse={valid:boolean;errors:{field:string;code:string;m
 export type ChangePreview={baseRevision:string;validation:{valid:boolean;errors:{file:string;path:string;code:string;message:string;severity:string}[]};diff:string;affectedObjects:string[];affectedMetrics:string[]};
 export type ChangeResult={branch:string;commitSha:string;mergeRequest:{id:number;url:string}};
 
-const key=import.meta.env.VITE_API_KEY;
-export async function api<T>(path:string,init?:RequestInit):Promise<T>{
-  const res=await fetch('/api/v1'+path,{...init,headers:{...(key?{'X-API-Key':key}:{}),'Content-Type':'application/json',...init?.headers}});
-  if(!res.ok){const body=await res.json().catch(()=>({message:res.statusText}));const error=new Error(body.message||body.hint||res.statusText) as Error&{code?:string;hint?:string};error.code=body.code;error.hint=body.hint;throw error}
+let accessToken:string|null=null;
+let refreshSession:(()=>Promise<boolean>)|null=null;
+let sessionExpired:(()=>void)|null=null;
+
+export class ApiError extends Error{
+  status:number;
+  code?:string;
+  hint?:string;
+  constructor(status:number,message:string,code?:string,hint?:string){super(message);this.name='ApiError';this.status=status;this.code=code;this.hint=hint}
+}
+
+export function setApiAccessToken(token:string|null){accessToken=token}
+export function configureApiSession(refresh:()=>Promise<boolean>,expired:()=>void){refreshSession=refresh;sessionExpired=expired}
+
+export async function api<T>(path:string,init?:RequestInit):Promise<T>{return request<T>(path,init,true)}
+
+export async function authApi<T>(path:string,init?:RequestInit):Promise<T>{
+  const headers=new Headers(init?.headers);
+  if(init?.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
+  const res=await fetch('/api/v1/auth'+path,{...init,credentials:'same-origin',headers});
+  if(!res.ok){
+    const body=await res.json().catch(()=>({message:res.statusText}));
+    throw new ApiError(res.status,body.message||res.statusText,body.code,body.hint);
+  }
+  if(res.status===204)return undefined as T;
+  return res.json();
+}
+
+async function request<T>(path:string,init:RequestInit|undefined,retry:boolean):Promise<T>{
+  const headers=new Headers(init?.headers);
+  if(accessToken)headers.set('Authorization','Bearer '+accessToken);
+  if(init?.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
+  const res=await fetch('/api/v1'+path,{...init,credentials:'same-origin',headers});
+  if(res.status===401&&retry&&refreshSession&&!path.startsWith('/auth/')){
+    if(await refreshSession())return request<T>(path,init,false);
+  }
+  if(!res.ok){
+    const body=await res.json().catch(()=>({message:res.statusText}));
+    if(res.status===401&&sessionExpired){
+      sessionExpired();
+      // The authenticated tree is being unmounted. Abandon the caller instead of
+      // surfacing an unhandled rejection from a page-level data-loading effect.
+      return new Promise<T>(()=>{});
+    }
+    const message=res.status===403?'You are not permitted to perform this action.':body.message||body.hint||res.statusText;
+    throw new ApiError(res.status,message,body.code,body.hint);
+  }
   if(res.status===204)return undefined as T;
   return res.json();
 }

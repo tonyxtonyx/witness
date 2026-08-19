@@ -8,3 +8,6 @@ frontend/dist/
 .env.*
 !.env.example
 *.log
+CLAUDE.MD
+# Local identity database (password, API-key and refresh-token hashes)
+/data/
