@@ -46,7 +46,7 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
     try {
       Optional<SemanticPrincipal> principal = resolve(request);
       principal.ifPresent(value -> request.setAttribute(PRINCIPAL_ATTRIBUTE, value));
-      if (request.getRequestURI().startsWith("/api/")
+      if (protectedPath(request.getRequestURI())
           && !publicPath(request.getRequestURI())
           && principal.isEmpty()) {
         unauthorized(response, correlation);
@@ -83,7 +83,16 @@ public class ApiSecurityFilter extends OncePerRequestFilter {
   }
 
   private boolean publicPath(String path) {
-    return path.startsWith("/api/v1/auth/") || path.startsWith("/actuator/health");
+    return path.startsWith("/api/v1/auth/")
+        || path.equals("/actuator/health")
+        || path.equals("/actuator/health/liveness")
+        || path.equals("/actuator/health/readiness");
+  }
+
+  private boolean protectedPath(String path) {
+    return path.startsWith("/api/")
+        || path.equals("/actuator")
+        || path.startsWith("/actuator/");
   }
 
   private void unauthorized(HttpServletResponse response, String correlation) throws IOException {

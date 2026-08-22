@@ -331,8 +331,10 @@ final class McpToolSchemas {
     return object(
         properties(
             "durationMs", integer(0, Integer.MAX_VALUE),
-            "engineQueryId", nullable(string())),
-        List.of("durationMs"));
+            "engineQueryId", nullable(string()),
+            "cacheHit", bool(),
+            "correlationId", string()),
+        List.of("durationMs", "cacheHit", "correlationId"));
   }
 
   private Map<String, Object> string() {

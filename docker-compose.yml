@@ -24,8 +24,6 @@ services:
       ALLOW_INSECURE_API_KEY: "true"
       MCP_EXPOSE_COMPILED_SQL: "true"
       MCP_EXPOSE_PHYSICAL_LINEAGE: "true"
-      PGWIRE_USERNAME: semantic
-      PGWIRE_PASSWORD: semantic
       GITLAB_ENABLED: "false"
     ports: ["8080:8080", "${PGWIRE_HOST_PORT:-55433}:5433"]
     depends_on: {trino: {condition: service_healthy}}

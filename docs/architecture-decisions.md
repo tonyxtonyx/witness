@@ -17,6 +17,7 @@ a new ADR.
 | [ADR-002](#adr-002-use-trino-as-the-physical-query-execution-engine) | Use Trino as the physical query execution engine | Accepted |
 | [ADR-003](#adr-003-serve-a-validated-immutable-catalog-snapshot) | Serve a validated immutable catalog snapshot | Accepted |
 | [ADR-004](#adr-004-project-semantic-relationships-as-virtual-postgresql-foreign-keys) | Project semantic relationships as virtual PostgreSQL foreign keys | Accepted |
+| [ADR-005](#adr-005-apply-witness-identity-and-rbac-to-pgwire) | Apply Witness identity and RBAC to pgwire | Accepted; supersedes ADR-001 rule 7 |
 
 ```mermaid
 flowchart LR
@@ -390,9 +391,44 @@ Revisit this decision if Witness introduces source profiling or integrity guaran
 unique keys other than object primary keys, models bridge tables implicitly, or adopts a catalog
 service capable of expressing semantic constraints more precisely than JDBC metadata.
 
+## ADR-005: Apply Witness identity and RBAC to pgwire
+
+- **Status:** Accepted
+- **Date:** 2026-08-21
+- **Owners:** Witness maintainers
+- **Supersedes:** ADR-001 rule 7
+
+### Decision
+
+The pgwire endpoint authenticates an enabled local Witness user with their password or a named
+service account with its API key. It does not issue access or refresh tokens. The connection keeps
+only its authenticated identity, and the identity store re-resolves enabled state, roles, and
+domain grants for every query.
+
+Pgwire account-name matching is case-insensitive and `session_user` reports the stored account
+name. Local usernames are normalized to lowercase. This intentionally differs from PostgreSQL's
+case-sensitive quoted role names and follows the Witness identity-store contract.
+
+Catalog metadata includes only domains and resources for which the current identity has `READ`.
+Unreadable resources are indistinguishable from absent resources. Analytical execution requires
+`QUERY` on every referenced domain after the current grants are resolved. The database name remains
+the single hardcoded compatibility database, `semantic`.
+
+Authentication remains PostgreSQL cleartext-password exchange because Witness stores BCrypt
+password hashes and API-key digests rather than SCRAM or PostgreSQL MD5 verifiers. The embedded
+server still does not terminate TLS and must remain local or behind trusted TLS termination.
+
+### Consequences
+
+- JDBC sessions observe grant revocation and account disablement without reconnecting.
+- PostgreSQL catalog discovery is a filtered view of the governed model and cannot enumerate
+  hidden domains.
+- Connection pooling does not share principals because identity state remains connection-local.
+- The old `PGWIRE_USERNAME` and `PGWIRE_PASSWORD` static credential is removed.
+
 ## Cross-cutting invariants
 
-The four decisions establish these invariants:
+The five decisions establish these invariants:
 
 - pgwire presents semantic metadata; it is not the metadata or business-data store.
 - Trino executes physical queries; it is not the semantic source of truth.

@@ -81,6 +81,20 @@ public class IdentityRepository {
         .findFirst();
   }
 
+  public Optional<ServiceAccountRecord> findEnabledServiceAccountById(long id) {
+    return jdbc.query(
+        "SELECT sa.id,sa.name,sa.api_key_hash,r.id,r.name,r.is_admin FROM service_accounts sa JOIN roles r ON r.id=sa.role_id WHERE sa.id=? AND sa.enabled=TRUE AND sa.requires_rotation=FALSE",
+        (rs, row) ->
+            new ServiceAccountRecord(
+                rs.getLong(1),
+                rs.getString(2),
+                rs.getString(3),
+                new RoleRecord(rs.getLong(4), rs.getString(5), rs.getBoolean(6))),
+        id)
+        .stream()
+        .findFirst();
+  }
+
   public SemanticPrincipal resolveServiceAccount(ServiceAccountRecord account) {
     Grants grants = grants(List.of(account.role()));
     return SemanticPrincipal.serviceAccount(

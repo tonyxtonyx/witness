@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.acme.semantic.cache.SemanticCacheManager;
 import com.acme.semantic.execution.*;
 import java.sql.*;
 import java.util.*;
@@ -18,16 +19,21 @@ import org.springframework.boot.test.mock.mockito.MockBean;
       "semantic.pgwire.port=55434",
       "semantic.gitlab.enabled=false",
       "semantic.model-path=semantic-model",
-      "semantic.pgwire.username=test",
-      "semantic.pgwire.password=secret",
+      "semantic.api-key=secret",
+      "semantic.allow-insecure-api-key=true",
+      "spring.datasource.url=jdbc:h2:mem:pgwire-compat;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
       "semantic.trino.url=jdbc:trino://invalid:8080"
     })
 class PgJdbcIntegrationTest {
+  private static final String USER = "semantic-api-key";
+  private static final String PASSWORD = "secret";
   @MockBean QueryExecutor executor;
   @Autowired PgQueryService queryService;
+  @Autowired SemanticCacheManager cache;
 
   @BeforeEach
   void stub() {
+    cache.invalidateAll();
     when(executor.execute(any(), anyList()))
         .thenReturn(
             new QueryResult(
@@ -40,7 +46,7 @@ class PgJdbcIntegrationTest {
   void connectsExecutesAndReadsMetadata() throws Exception {
     try (Connection c =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       try (ResultSet rs = c.getMetaData().getSchemas()) {
         Set<String> schemas = new HashSet<>();
         while (rs.next()) schemas.add(rs.getString("TABLE_SCHEM"));
@@ -88,7 +94,7 @@ class PgJdbcIntegrationTest {
           ResultSet rs = s.executeQuery()) {
         assertThat(rs.next()).isTrue();
         assertThat(rs.getString(1)).isEqualTo("retail");
-        assertThat(rs.getString(2)).isEqualTo("semantic");
+        assertThat(rs.getString(2)).isEqualTo(USER);
       }
       try (PreparedStatement s =
               c.prepareStatement(
@@ -115,7 +121,7 @@ class PgJdbcIntegrationTest {
   void exposesSemanticRelationshipsAsVirtualForeignKeys() throws Exception {
     try (Connection connection =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       DatabaseMetaData metadata = connection.getMetaData();
 
       try (ResultSet keys = metadata.getPrimaryKeys("semantic", "retail", "orders")) {
@@ -185,8 +191,8 @@ class PgJdbcIntegrationTest {
           DriverManager.getConnection(
               "jdbc:postgresql://localhost:55434/semantic?sslmode=disable&preferQueryMode="
                   + queryMode,
-              "test",
-              "secret")) {
+              USER,
+              PASSWORD)) {
         Map<String, Long> schemas = new HashMap<>();
         try (Statement statement = connection.createStatement();
             ResultSet result =
@@ -231,7 +237,7 @@ class PgJdbcIntegrationTest {
 
     try (Connection connection =
             DriverManager.getConnection(
-                "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret");
+                "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD);
         Statement statement = connection.createStatement();
         ResultSet result =
             statement.executeQuery(
@@ -248,8 +254,8 @@ class PgJdbcIntegrationTest {
         DriverManager.getConnection(
             "jdbc:postgresql://localhost:55434/semantic?sslmode=disable"
                 + "&prepareThreshold=1&binaryTransfer=true",
-            "test",
-            "secret")) {
+            USER,
+            PASSWORD)) {
       assertThat(connection.isValid(2)).isTrue();
       assertThat(connection.isValid(2)).isTrue();
 
@@ -280,7 +286,7 @@ class PgJdbcIntegrationTest {
   void tracksTransactionsRecoversWithRollbackAndHonorsSetSchema() throws Exception {
     try (Connection connection =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       connection.setAutoCommit(false);
       try (Statement statement = connection.createStatement();
           ResultSet result = statement.executeQuery("SELECT 1")) {
@@ -319,7 +325,7 @@ class PgJdbcIntegrationTest {
   void exposesScopedColumnsAndPostgresTypeMetadata() throws Exception {
     try (Connection connection =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       try (ResultSet columns =
           connection.getMetaData().getColumns("semantic", "ai_rnd", "experiments", "%")) {
         List<String> tables = read(columns, "TABLE_NAME");
@@ -337,8 +343,8 @@ class PgJdbcIntegrationTest {
     try (Connection connection =
             DriverManager.getConnection(
                 "jdbc:postgresql://localhost:55434/semantic?sslmode=disable&preferQueryMode=simple",
-                "test",
-                "secret");
+                USER,
+                PASSWORD);
         Statement statement = connection.createStatement()) {
       try (ResultSet result = statement.executeQuery("SELECT 1 -- health probe")) {
         assertThat(result.next()).isTrue();
@@ -369,7 +375,7 @@ class PgJdbcIntegrationTest {
   void keepsCommonDatabaseMetadataMethodsUsable() throws Exception {
     try (Connection connection =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       DatabaseMetaData metadata = connection.getMetaData();
       assertThatCode(() -> drain(metadata.getCatalogs())).doesNotThrowAnyException();
       assertThatCode(() -> drain(metadata.getFunctions(null, "%", "%")))
@@ -408,7 +414,7 @@ class PgJdbcIntegrationTest {
 
     try (Connection connection =
             DriverManager.getConnection(
-                "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret");
+                "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD);
         Statement statement = connection.createStatement();
         ExecutorService client = Executors.newSingleThreadExecutor()) {
       Future<?> query =
@@ -432,7 +438,7 @@ class PgJdbcIntegrationTest {
   void projectsAndFiltersSimpleCatalogQueriesInsteadOfReturningFixedShapes() throws Exception {
     try (Connection connection =
         DriverManager.getConnection(
-            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", "test", "secret")) {
+            "jdbc:postgresql://localhost:55434/semantic?sslmode=disable", USER, PASSWORD)) {
       try (Statement statement = connection.createStatement();
           ResultSet result =
               statement.executeQuery(

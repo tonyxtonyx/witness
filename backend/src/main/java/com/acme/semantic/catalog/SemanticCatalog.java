@@ -1,5 +1,6 @@
 package com.acme.semantic.catalog;
 
+import com.acme.semantic.cache.SemanticCacheManager;
 import com.acme.semantic.gitlab.ModelRepository;
 import com.acme.semantic.model.*;
 import com.acme.semantic.validation.*;
@@ -9,6 +10,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -18,13 +20,24 @@ public class SemanticCatalog {
   private final ModelRepository repository;
   private final ModelParser parser;
   private final ModelValidator validator;
+  private final SemanticCacheManager cache;
   private final AtomicReference<ActiveModel> active = new AtomicReference<>();
   private volatile Status status = new Status(false, null, null, null, "Not loaded");
 
   public SemanticCatalog(ModelRepository repository, ModelParser parser, ModelValidator validator) {
+    this(repository, parser, validator, SemanticCacheManager.disabled());
+  }
+
+  @Autowired
+  public SemanticCatalog(
+      ModelRepository repository,
+      ModelParser parser,
+      ModelValidator validator,
+      SemanticCacheManager cache) {
     this.repository = repository;
     this.parser = parser;
     this.validator = validator;
+    this.cache = cache;
   }
 
   @PostConstruct
@@ -67,6 +80,7 @@ public class SemanticCatalog {
         return status;
       }
       active.set(new ActiveModel(candidate, revision.files()));
+      cache.invalidateAll();
       status = new Status(true, candidate.revision(), Instant.now(), result, "Model active");
     } catch (Exception e) {
       status =

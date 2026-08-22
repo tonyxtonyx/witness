@@ -404,18 +404,26 @@ Use the PostgreSQL driver in DBeaver or any pgjdbc application.
 
 ```text
 JDBC URL: jdbc:postgresql://localhost:55433/semantic?sslmode=disable
-Username: semantic
-Password: semantic
+Username: semantic-api-key
+Password: dev-secret
 Database: semantic
 ```
+
+Use any enabled local Witness user's username and password, or a service-account name and its API
+key. The values above are the service account bootstrapped by the default Docker Compose
+`REST_API_KEY`; use a rotated secret outside local development.
+
+Pgwire account-name matching is case-insensitive and reports the stored account name as
+`session_user`. Local usernames are normalized to lowercase by the identity store. This deliberately
+differs from PostgreSQL role names, which are case-sensitive once quoted.
 
 Java example:
 
 ```java
 try (var connection = DriverManager.getConnection(
         "jdbc:postgresql://localhost:55433/semantic?sslmode=disable",
-        "semantic",
-        "semantic")) {
+        "semantic-api-key",
+        "dev-secret")) {
     // Use regular JDBC metadata, statements, and prepared statements.
 }
 ```
@@ -572,8 +580,6 @@ not part of the MCP contract. See the complete
 | `WITNESS_REFRESH_TOKEN_DAYS` | `30` | Refresh-token lifetime |
 | `PGWIRE_PORT` | `5433` | pgwire port inside the backend container |
 | `PGWIRE_HOST_PORT` | `55433` | Published Docker host port |
-| `PGWIRE_USERNAME` | `semantic` | SQL username |
-| `PGWIRE_PASSWORD` | `semantic` | SQL password |
 | `PGWIRE_MAX_FRAME_BYTES` | `1048576` | Maximum accepted pgwire packet |
 | `PGWIRE_MAX_PREPARED_STATEMENTS` | `256` | Statements and portals per connection |
 | `TRINO_JDBC_URL` | `jdbc:trino://localhost:8081/...` | Trino JDBC endpoint |
@@ -710,7 +716,10 @@ Confirm that the Trino PostgreSQL connector can reach `demo-db:5432` inside the 
 <details>
 <summary><strong>DBeaver cannot connect</strong></summary>
 
-Use `semantic / semantic`, port `55433`, and add `?sslmode=disable` to the JDBC URL. If DBeaver cached old metadata, invalidate and reconnect the connection.
+Use an enabled local Witness user/password or a service-account name/API key, port `55433`, and
+add `?sslmode=disable` to the JDBC URL. The default Compose bootstrap is
+`semantic-api-key / dev-secret`. If DBeaver cached old metadata, invalidate and reconnect the
+connection.
 
 </details>
 

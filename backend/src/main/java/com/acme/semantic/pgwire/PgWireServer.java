@@ -1,7 +1,11 @@
 package com.acme.semantic.pgwire;
 
+import com.acme.semantic.auth.AuthenticationService;
 import com.acme.semantic.compiler.SqlCompilationException;
 import com.acme.semantic.config.SemanticProperties;
+import com.acme.semantic.core.SemanticErrorCode;
+import com.acme.semantic.core.SemanticException;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.execution.QueryExecutionException;
 import com.acme.semantic.execution.QueryResult;
 import io.netty.bootstrap.ServerBootstrap;
@@ -25,7 +29,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -60,14 +63,19 @@ public class PgWireServer {
 
   private final SemanticProperties properties;
   private final PgQueryService service;
+  private final AuthenticationService authentication;
   private EventLoopGroup boss;
   private EventLoopGroup workers;
   private EventExecutorGroup queryWorkers;
   private Channel channel;
 
-  public PgWireServer(SemanticProperties properties, PgQueryService service) {
+  public PgWireServer(
+      SemanticProperties properties,
+      PgQueryService service,
+      AuthenticationService authentication) {
     this.properties = properties;
     this.service = service;
+    this.authentication = authentication;
   }
 
   @PostConstruct
@@ -93,7 +101,7 @@ public class PgWireServer {
                         .addLast(
                             queryWorkers,
                             "pgwire-handler",
-                            new Handler(properties.pgwire(), service));
+                            new Handler(properties.pgwire(), service, authentication));
                   }
                 })
             .bind(properties.pgwire().port())
@@ -176,23 +184,28 @@ public class PgWireServer {
   static final class Handler extends SimpleChannelInboundHandler<Message> {
     private final SemanticProperties.Pgwire config;
     private final PgQueryService service;
+    private final AuthenticationService authentication;
     private final Map<String, PgQueryService.Prepared> statements = new HashMap<>();
     private final Map<String, Portal> portals = new HashMap<>();
     private final int backendProcessId = SECURE_RANDOM.nextInt(Integer.MAX_VALUE - 1) + 1;
     private final int backendSecret = SECURE_RANDOM.nextInt();
     private boolean authenticated;
     private boolean awaitingSync;
-    private String pendingPassword;
     private String startupUser;
+    private SemanticPrincipal sessionPrincipal;
     private String currentSchema;
     private String searchPath;
     private final Map<String, String> sessionSettings = new HashMap<>();
     private volatile Thread executingThread;
     private TransactionStatus transactionStatus = TransactionStatus.IDLE;
 
-    Handler(SemanticProperties.Pgwire config, PgQueryService service) {
+    Handler(
+        SemanticProperties.Pgwire config,
+        PgQueryService service,
+        AuthenticationService authentication) {
       this.config = config;
       this.service = service;
+      this.authentication = authentication;
     }
 
     @Override
@@ -271,7 +284,7 @@ public class PgWireServer {
       if (payload.readableBytes() < 4) throw ProtocolException.fatal("Malformed StartupMessage");
       int protocol = payload.readInt();
       if (protocol != PROTOCOL_V3) {
-        error(ctx, "0A000", "Unsupported PostgreSQL protocol version");
+        error(ctx, "0A000", "Unsupported PostgreSQL protocol version", true);
         ctx.close();
         return;
       }
@@ -283,44 +296,55 @@ public class PgWireServer {
         parameters.put(key, cstring(payload));
       }
       startupUser = parameters.get("user");
-      if (!config.username().equals(startupUser)) {
-        log.warn(
-            "pgwire authentication rejected remote={} user={} reason=username-mismatch",
-            ctx.channel().remoteAddress(),
-            startupUser);
-        error(ctx, "28000", "Invalid SQL username");
-        ctx.close();
-        return;
-      }
       String database = parameters.getOrDefault("database", startupUser);
       if (!"semantic".equals(database)) {
-        error(ctx, "3D000", "Database does not exist");
+        log.warn(
+            "pgwire startup rejected remote={} user={} database={} reason=invalid-database",
+            ctx.channel().remoteAddress(),
+            startupUser,
+            database);
+        error(ctx, "3D000", "Database does not exist", true);
         ctx.close();
         return;
       }
-      pendingPassword = config.password();
       message(ctx, 'R', out -> out.writeInt(3));
       ctx.flush();
     }
 
     private void password(ChannelHandlerContext ctx, ByteBuf payload) {
       String supplied = cstring(payload);
-      boolean matches = secureEquals(pendingPassword, supplied);
-      log.info(
-          "pgwire authentication remote={} user={} matched={}",
-          ctx.channel().remoteAddress(),
-          startupUser,
-          matches);
-      if (!matches) {
-        error(ctx, "28P01", "Password authentication failed for user \"" + startupUser + "\"");
+      var local = authentication.authenticatePassword(startupUser, supplied);
+      var serviceAccount = authentication.authenticateApiKey(supplied);
+      sessionPrincipal =
+          local
+              .filter(principal -> sameUser(principal.username(), startupUser))
+              .or(
+                  () ->
+                      serviceAccount.filter(
+                          principal -> sameUser(principal.username(), startupUser)))
+              .orElse(null);
+      if (sessionPrincipal == null) {
+        log.warn(
+            "pgwire authentication rejected remote={} user={} reason=invalid-credentials-or-account-state",
+            ctx.channel().remoteAddress(),
+            startupUser);
+        error(
+            ctx,
+            "28P01",
+            "password authentication failed for user \"" + startupUser + "\"",
+            true);
         ctx.close();
         return;
       }
+      log.info(
+          "pgwire authentication accepted remote={} user={} provider={}",
+          ctx.channel().remoteAddress(),
+          startupUser,
+          sessionPrincipal.provider());
       authenticated = true;
       BACKENDS.put(backendProcessId, this);
-      pendingPassword = null;
-      currentSchema = service.defaultSchemaName();
-      searchPath = currentSchema;
+      currentSchema = service.defaultSchemaName(sessionPrincipal);
+      searchPath = currentSchema == null ? "" : currentSchema;
       sessionSettings.put("client_encoding", "UTF8");
       sessionSettings.put("standard_conforming_strings", "on");
       sessionSettings.put("timezone", "UTC");
@@ -352,20 +376,24 @@ public class PgWireServer {
         return;
       }
       for (String query : queries) {
-        PgQueryService.Prepared prepared = service.prepare(query);
-        executeSimple(ctx, prepared);
+        PgQueryService.SessionSettings session = session();
+        PgQueryService.Prepared prepared = service.prepare(query, session);
+        executeSimple(ctx, prepared, session);
       }
       ready(ctx);
     }
 
-    private void executeSimple(ChannelHandlerContext ctx, PgQueryService.Prepared prepared) {
+    private void executeSimple(
+        ChannelHandlerContext ctx,
+        PgQueryService.Prepared prepared,
+        PgQueryService.SessionSettings session) {
       if (prepared.empty()) {
         emptyQuery(ctx);
         return;
       }
       String tag = transitionBeforeExecution(prepared);
-      applySessionCommand(prepared.sql());
-      QueryResult result = executeQuery(prepared, List.of());
+      applySessionCommand(prepared.sql(), session.principal());
+      QueryResult result = executeQuery(prepared, List.of(), session);
       sendResult(ctx, result, true, new short[0], 0, 0, tag);
     }
 
@@ -381,7 +409,7 @@ public class PgWireServer {
       requireExhausted(payload);
       if (!statements.containsKey(name) && statements.size() >= config.maxPreparedStatements())
         throw new ProtocolException("54000", "Too many prepared statements", false);
-      statements.put(name, service.prepare(sql).withParameterOids(parameterOids));
+      statements.put(name, service.prepare(sql, session()).withParameterOids(parameterOids));
       if (name.isEmpty()) portals.remove("");
       message(ctx, '1', ignored -> {});
       ctx.flush();
@@ -394,6 +422,7 @@ public class PgWireServer {
       PgQueryService.Prepared prepared = statements.get(statementName);
       if (prepared == null)
         throw new ProtocolException("26000", "Prepared statement does not exist", false);
+      service.requireReadable(prepared, session().principal());
 
       int formatCount = readUnsignedShort(payload);
       short[] parameterFormats = readFormats(payload, formatCount);
@@ -433,15 +462,18 @@ public class PgWireServer {
       byte kind = payload.readByte();
       String name = cstring(payload);
       requireExhausted(payload);
+      SemanticPrincipal principal = session().principal();
       if (kind == 'S') {
         PgQueryService.Prepared prepared = statements.get(name);
         if (prepared == null)
           throw new ProtocolException("26000", "Prepared statement does not exist", false);
+        service.requireReadable(prepared, principal);
         parameterDescription(ctx, prepared);
         rowDescription(ctx, prepared.columns(), new short[0]);
       } else if (kind == 'P') {
         Portal portal = portals.get(name);
         if (portal == null) throw new ProtocolException("34000", "Portal does not exist", false);
+        service.requireReadable(portal.prepared, principal);
         rowDescription(ctx, portal.prepared.columns(), portal.resultFormats);
       } else {
         throw ProtocolException.protocol("Describe target must be S or P");
@@ -458,15 +490,17 @@ public class PgWireServer {
       if (maxRows < 0) throw ProtocolException.protocol("Execute maxRows must not be negative");
       Portal portal = portals.get(portalName);
       if (portal == null) throw new ProtocolException("34000", "Portal does not exist", false);
+      PgQueryService.SessionSettings session = session();
+      service.requireExecutionAccess(portal.prepared, session.principal());
       if (portal.prepared.empty()) {
         emptyQuery(ctx);
         ctx.flush();
         return;
       }
-      if (portal.result == null) {
+      if (portal.result == null || portal.prepared.compiled() == null) {
         portal.commandTag = transitionBeforeExecution(portal.prepared);
-        applySessionCommand(portal.prepared.sql());
-        portal.result = executeQuery(portal.prepared, portal.parameters);
+        applySessionCommand(portal.prepared.sql(), session.principal());
+        portal.result = executeQuery(portal.prepared, portal.parameters, session);
       }
       portal.offset =
           sendResult(
@@ -520,21 +554,37 @@ public class PgWireServer {
     }
 
     private PgQueryService.SessionSettings session() {
-      return new PgQueryService.SessionSettings(currentSchema, searchPath, sessionSettings);
+      SemanticPrincipal current =
+          authentication
+              .refreshPrincipal(sessionPrincipal)
+              .orElseThrow(
+                  () ->
+                      new ProtocolException(
+                          "28000", "Session authorization is no longer valid", true));
+      sessionPrincipal = current;
+      if (currentSchema == null || !service.hasSchema(current, currentSchema)) {
+        currentSchema = service.defaultSchemaName(current);
+        searchPath = currentSchema == null ? "" : currentSchema;
+        sessionSettings.put("search_path", searchPath);
+      }
+      return new PgQueryService.SessionSettings(
+          currentSchema, searchPath, sessionSettings, current);
     }
 
     private QueryResult executeQuery(
-        PgQueryService.Prepared prepared, List<Object> parameters) {
+        PgQueryService.Prepared prepared,
+        List<Object> parameters,
+        PgQueryService.SessionSettings session) {
       executingThread = Thread.currentThread();
       try {
-        return service.execute(prepared, parameters, session());
+        return service.execute(prepared, parameters, session);
       } finally {
         executingThread = null;
         Thread.interrupted();
       }
     }
 
-    private void applySessionCommand(String sql) {
+    private void applySessionCommand(String sql, SemanticPrincipal principal) {
       String normalized = sql.strip().replaceFirst(";\\s*$", "");
       var searchPathMatcher =
           Pattern.compile(
@@ -544,7 +594,7 @@ public class PgWireServer {
         List<String> requested = parseSearchPath(searchPathMatcher.group(1));
         String resolved =
             requested.stream()
-                .filter(service::hasSchema)
+                .filter(schema -> service.hasSchema(principal, schema))
                 .findFirst()
                 .orElseThrow(
                     () -> new ProtocolException("3F000", "No valid schema in search_path", false));
@@ -875,13 +925,14 @@ public class PgWireServer {
       ctx.flush();
     }
 
-    private void error(ChannelHandlerContext ctx, String state, String text) {
+    private void error(
+        ChannelHandlerContext ctx, String state, String text, boolean fatal) {
       message(
           ctx,
           'E',
           out -> {
             out.writeByte('S');
-            cstring(out, "ERROR");
+            cstring(out, fatal ? "FATAL" : "ERROR");
             out.writeByte('C');
             cstring(out, state);
             out.writeByte('M');
@@ -895,6 +946,7 @@ public class PgWireServer {
       String state;
       String text;
       boolean fatal = exception instanceof ProtocolException protocol && protocol.fatal;
+      boolean terminating = fatal || messageType == 0 || messageType == 'p';
       if (exception instanceof ProtocolException protocol) {
         state = protocol.state;
         text = protocol.getMessage();
@@ -905,6 +957,17 @@ public class PgWireServer {
         state = execution.sqlState();
         text = "Query execution failed";
         log.warn("pgwire query execution failed remote={}", ctx.channel().remoteAddress(), exception);
+      } else if (exception instanceof SemanticException semantic) {
+        if (semantic.code() == SemanticErrorCode.SEMANTIC_OBJECT_NOT_FOUND) {
+          state = "42P01";
+          text = "Unknown semantic object";
+        } else if (semantic.code() == SemanticErrorCode.ACCESS_DENIED) {
+          state = "42501";
+          text = semantic.getMessage();
+        } else {
+          state = "XX000";
+          text = "Semantic query failed";
+        }
       } else {
         state = "XX000";
         text = "Internal server error";
@@ -913,15 +976,13 @@ public class PgWireServer {
 
       if (transactionStatus == TransactionStatus.TRANSACTION)
         transactionStatus = TransactionStatus.FAILED;
-      error(ctx, state, text);
-      if (fatal) {
+      error(ctx, state, text, terminating);
+      if (terminating) {
         ctx.close();
       } else if (isExtended(messageType)) {
         awaitingSync = true;
-      } else if (messageType != 0 && messageType != 'p') {
-        ready(ctx);
       } else {
-        ctx.close();
+        ready(ctx);
       }
     }
 
@@ -961,10 +1022,8 @@ public class PgWireServer {
       BACKENDS.remove(backendProcessId, this);
     }
 
-    private static boolean secureEquals(String expected, String supplied) {
-      if (expected == null || supplied == null) return false;
-      return MessageDigest.isEqual(
-          expected.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
+    private static boolean sameUser(String expected, String supplied) {
+      return expected != null && supplied != null && expected.equalsIgnoreCase(supplied);
     }
 
     private static int readUnsignedShort(ByteBuf payload) {
@@ -1131,7 +1190,7 @@ public class PgWireServer {
       ChannelHandlerContext ctx, String state, String text) {
     ByteBuf body = ctx.alloc().buffer();
     body.writeByte('S');
-    writeCString(body, "ERROR");
+    writeCString(body, "FATAL");
     body.writeByte('C');
     writeCString(body, state);
     body.writeByte('M');

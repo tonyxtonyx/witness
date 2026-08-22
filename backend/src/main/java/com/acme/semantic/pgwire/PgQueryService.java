@@ -1,7 +1,14 @@
 package com.acme.semantic.pgwire;
 
+import com.acme.semantic.api.SemanticSqlReferenceAuthorizer;
+import com.acme.semantic.cache.CacheKind;
+import com.acme.semantic.cache.ReadableModelCache;
+import com.acme.semantic.cache.SemanticAuthorizationFingerprints;
+import com.acme.semantic.cache.SemanticCacheManager;
 import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.compiler.*;
+import com.acme.semantic.core.SemanticAccessPolicy;
+import com.acme.semantic.core.SemanticPrincipal;
 import com.acme.semantic.execution.*;
 import com.acme.semantic.model.SemanticModel;
 import java.sql.DatabaseMetaData;
@@ -15,28 +22,87 @@ import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.util.TablesNamesFinder;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 @Service
 public class PgQueryService {
   private final SemanticCatalog catalog;
+  private final SemanticAccessPolicy policy;
+  private final SemanticSqlReferenceAuthorizer sqlReferences;
   private final SemanticSqlCompiler compiler;
   private final QueryExecutor executor;
+  private final SemanticCacheManager cache;
+  private final ReadableModelCache readableModels;
   private final SemanticForeignKeyProjector foreignKeyProjector =
       new SemanticForeignKeyProjector();
 
   public PgQueryService(
-      SemanticCatalog catalog, SemanticSqlCompiler compiler, QueryExecutor executor) {
+      SemanticCatalog catalog,
+      SemanticAccessPolicy policy,
+      SemanticSqlReferenceAuthorizer sqlReferences,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor) {
+    this(catalog, policy, sqlReferences, compiler, executor, SemanticCacheManager.disabled());
+  }
+
+  public PgQueryService(
+      SemanticCatalog catalog,
+      SemanticAccessPolicy policy,
+      SemanticSqlReferenceAuthorizer sqlReferences,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      SemanticCacheManager cache) {
+    this(
+        catalog,
+        policy,
+        sqlReferences,
+        compiler,
+        executor,
+        cache,
+        new ReadableModelCache(256));
+  }
+
+  @Autowired
+  public PgQueryService(
+      SemanticCatalog catalog,
+      SemanticAccessPolicy policy,
+      SemanticSqlReferenceAuthorizer sqlReferences,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      SemanticCacheManager cache,
+      ReadableModelCache readableModels) {
     this.catalog = catalog;
+    this.policy = policy;
+    this.sqlReferences = sqlReferences;
     this.compiler = compiler;
     this.executor = executor;
+    this.cache = cache;
+    this.readableModels = readableModels;
   }
 
   public Prepared prepare(String sql) {
+    return prepare(sql, null);
+  }
+
+  public Prepared prepare(String sql, SessionSettings session) {
     if (commentFree(sql).isBlank())
       return new Prepared(sql, null, result(List.of(), List.of()));
     String normalized = sql.strip().toLowerCase(Locale.ROOT);
-    if (isSystem(normalized)) return new Prepared(sql, null, metadata(sql, List.of()));
-    CompiledQuery compiled = compiler.compile(sql, catalog.model());
+    if (isSystem(normalized)) return new Prepared(sql, null, metadata(sql, List.of(), session));
+    SemanticPrincipal principal = principal(session);
+    policy.requireAuthenticated(principal);
+    SemanticModel model = catalog.model();
+    sqlReferences.requireReadableReferences(principal, sql, model);
+    ReadableModelCache.View readable = readableModels.resolve(model, principal, policy);
+    CompiledQuery compiled;
+    if (cache.enabled(CacheKind.PLAN)) {
+      String authorization =
+          SemanticAuthorizationFingerprints.forRawSql(
+              policy, principal, model, readable.fingerprint());
+      compiled = cache.compile(sql, readable.model(), authorization, compiler);
+    } else {
+      compiled = compiler.compile(sql, readable.model());
+    }
     return new Prepared(sql, compiled, null);
   }
 
@@ -46,17 +112,41 @@ public class PgQueryService {
 
   public QueryResult execute(
       Prepared prepared, List<Object> parameters, SessionSettings session) {
-    return prepared.compiled() == null
-        ? metadata(prepared.sql(), parameters, session)
-        : executor.execute(prepared.compiled(), parameters);
+    if (prepared.compiled() == null) return metadata(prepared.sql(), parameters, session);
+    SemanticPrincipal principal = principal(session);
+    requireExecutionAccess(prepared, principal);
+    if (!cache.enabled(CacheKind.RESULT)) {
+      return cache.executeUncached(prepared.compiled(), parameters, executor);
+    }
+    SemanticModel model = catalog.model();
+    ReadableModelCache.View readable = readableModels.resolve(model, principal, policy);
+    String authorization =
+        SemanticAuthorizationFingerprints.forRawSql(
+            policy, principal, model, readable.fingerprint());
+    return cache.execute(
+        model.revision(),
+        prepared.compiled(),
+        parameters,
+        authorization,
+        executor);
   }
 
-  public String defaultSchemaName() {
-    return defaultSchema();
+  public void requireReadable(Prepared prepared, SemanticPrincipal principal) {
+    if (prepared.compiled() != null)
+      policy.requireReadableDomains(principal, prepared.compiled().domains());
   }
 
-  public boolean hasSchema(String schema) {
-    return catalog.model().domains().contains(schema);
+  public void requireExecutionAccess(Prepared prepared, SemanticPrincipal principal) {
+    if (prepared.compiled() != null)
+      policy.requireQueryDomains(principal, prepared.compiled().domains());
+  }
+
+  public String defaultSchemaName(SemanticPrincipal principal) {
+    return readableDomains(principal).stream().findFirst().orElse(null);
+  }
+
+  public boolean hasSchema(SemanticPrincipal principal, String schema) {
+    return catalog.model().domains().contains(schema) && policy.canReadDomain(principal, schema);
   }
 
   boolean isSystem(String sql) {
@@ -94,12 +184,9 @@ public class PgQueryService {
     }
   }
 
-  private QueryResult metadata(String sql, List<Object> parameters) {
-    return metadata(sql, parameters, null);
-  }
-
   private QueryResult metadata(
       String sql, List<Object> parameters, SessionSettings session) {
+    SemanticPrincipal principal = principal(session);
     String normalized = sql.strip().toLowerCase(Locale.ROOT).replaceFirst(";\\s*$", "");
     if (normalized.isEmpty()
         || normalized.startsWith("set ")
@@ -122,7 +209,7 @@ public class PgQueryService {
           rows(
               row(
                   session == null
-                      ? String.join(",", catalog.model().domains())
+                      ? String.join(",", readableDomains(principal))
                       : session.searchPath())));
     if (normalized.contains("current_setting("))
       return result(
@@ -135,30 +222,36 @@ public class PgQueryService {
     if (normalized.matches("select\\s+current_schema\\s*\\(\\s*\\)"))
       return result(
           cols(col("current_schema", Types.VARCHAR, "varchar")),
-          rows(row(session == null ? defaultSchema() : session.currentSchema())));
+          rows(row(session == null ? defaultSchemaName(principal) : session.currentSchema())));
     if (normalized.startsWith("select current_schema"))
       return result(
           cols(
               col("current_schema", Types.VARCHAR, "varchar"),
               col("session_user", Types.VARCHAR, "varchar")),
-          rows(row(session == null ? defaultSchema() : session.currentSchema(), "semantic")));
+          rows(
+              row(
+                  session == null ? defaultSchemaName(principal) : session.currentSchema(),
+                  principal.username())));
     if (normalized.contains("current_database()"))
       return result(cols(col("current_database", Types.VARCHAR, "varchar")), rows(row("semantic")));
     if (normalized.matches("select\\s+(?:session_user|current_user)"))
-      return result(cols(col("session_user", Types.VARCHAR, "varchar")), rows(row("semantic")));
+      return result(
+          cols(col("session_user", Types.VARCHAR, "varchar")), rows(row(principal.username())));
     if (normalized.matches("select\\s+pg_backend_pid\\s*\\(\\s*\\)"))
       return result(cols(col("pg_backend_pid", Types.INTEGER, "integer")), rows(row(1)));
     if (normalized.contains("pg_catalog.pg_settings")
         && normalized.contains("max_index_keys")) return maxIndexKeys();
     if (normalized.startsWith("select a.attname, a.atttypid"))
-      return bestRowIdentifier(sql, parameters);
-    if (isPrimaryKeyMetadataQuery(normalized)) return primaryKeys(sql);
+      return bestRowIdentifier(sql, parameters, principal);
+    if (isPrimaryKeyMetadataQuery(normalized)) return primaryKeys(sql, principal);
     if (normalized.contains("pg_constraint") && normalized.contains("contype = 'f'"))
-      return foreignKeys(sql);
+      return foreignKeys(sql, principal);
     if (normalized.contains("information_schema.referential_constraints"))
-      return referentialConstraints();
-    if (normalized.contains("information_schema.key_column_usage")) return keyColumnUsage();
-    if (normalized.contains("information_schema.table_constraints")) return tableConstraints();
+      return referentialConstraints(principal);
+    if (normalized.contains("information_schema.key_column_usage"))
+      return keyColumnUsage(principal);
+    if (normalized.contains("information_schema.table_constraints"))
+      return tableConstraints(principal);
     if (normalized.contains("pg_catalog.pg_database")) return databaseInfo();
     if (normalized.contains("pg_type") && normalized.contains("as is_array"))
       return pgJdbcTypeCache();
@@ -168,20 +261,24 @@ public class PgQueryService {
       return postgresTypes();
     if (normalized.contains("from pg_catalog.pg_class")
         && normalized.contains("where 1<>1")) return pgClassShapeProbe();
-    QueryResult projectedCatalog = simpleCatalogProjection(sql, parameters);
+    QueryResult projectedCatalog = simpleCatalogProjection(sql, parameters, principal);
     if (projectedCatalog != null) return projectedCatalog;
-    if (normalized.contains("pg_namespace") && !normalized.contains("pg_class")) return schemas();
-    if (isPgJdbcColumnsQuery(normalized)) return pgJdbcColumns(sql, parameters);
+    if (normalized.contains("pg_namespace") && !normalized.contains("pg_class"))
+      return schemas(principal);
+    if (isPgJdbcColumnsQuery(normalized)) return pgJdbcColumns(sql, parameters, principal);
     if (normalized.contains("pg_attribute"))
       return normalized.contains("table_cat")
-          ? columns(sql, parameters)
-          : catalogAttributes(sql, parameters);
+          ? columns(sql, parameters, principal)
+          : catalogAttributes(sql, parameters, principal);
     if (normalized.contains("pg_class"))
       return normalized.contains("table_cat")
-          ? tables(sql, parameters)
-          : catalogTables(sql, parameters);
-    if (normalized.contains("information_schema.schemata")) return informationSchemas();
-    if (normalized.contains("information_schema.tables")) return tables();
+          ? tables(sql, parameters, principal)
+          : catalogTables(sql, parameters, principal);
+    if (normalized.contains("information_schema.schemata")) return informationSchemas(principal);
+    if (normalized.contains("information_schema.columns"))
+      return columns(sql, parameters, principal);
+    if (normalized.contains("information_schema.tables"))
+      return tables(sql, parameters, principal);
     if (normalized.startsWith("select") || normalized.startsWith("with"))
       return result(cols(col("result", Types.VARCHAR, "varchar")), List.of());
     return result(List.of(), List.of());
@@ -358,11 +455,8 @@ public class PgQueryService {
         null);
   }
 
-  private QueryResult tables() {
-    return tables("", List.of());
-  }
-
-  private QueryResult tables(String sql, List<Object> parameters) {
+  private QueryResult tables(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols(
             col("TABLE_CAT", 12, "varchar"),
@@ -380,7 +474,8 @@ public class PgQueryService {
     String tablePattern = predicatePattern(sql, "c.relname", parameters);
     for (var o : catalog.model().objects().values()) {
       String domain = catalog.model().domain(o);
-      if (!matchesPattern(domain, schemaPattern)
+      if (!policy.canReadObject(principal, catalog.model(), o)
+          || !matchesPattern(domain, schemaPattern)
           || !matchesPattern(o.metadata().name(), tablePattern)) continue;
       r.add(
           row(
@@ -398,9 +493,9 @@ public class PgQueryService {
     return result(c, r);
   }
 
-  private QueryResult schemas() {
+  private QueryResult schemas(SemanticPrincipal principal) {
     List<List<Object>> rows = new ArrayList<>();
-    for (String schema : catalog.model().domains())
+    for (String schema : readableDomains(principal))
       rows.add(
           row(
               schemaOid(schema),
@@ -422,9 +517,9 @@ public class PgQueryService {
         rows);
   }
 
-  private QueryResult informationSchemas() {
+  private QueryResult informationSchemas(SemanticPrincipal principal) {
     List<List<Object>> rows = new ArrayList<>();
-    for (String schema : catalog.model().domains()) rows.add(row(schema));
+    for (String schema : readableDomains(principal)) rows.add(row(schema));
     return result(cols(col("schema_name", Types.VARCHAR, "varchar")), rows);
   }
 
@@ -432,7 +527,8 @@ public class PgQueryService {
     return result(cols(col("reltype", Types.BIGINT, "oid")), List.of());
   }
 
-  private QueryResult simpleCatalogProjection(String sql, List<Object> parameters) {
+  private QueryResult simpleCatalogProjection(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     PlainSelect select;
     try {
       var statement = CCJSqlParserUtil.parse(sql);
@@ -483,7 +579,8 @@ public class PgQueryService {
         String domain = catalog.model().domain(object);
         long objectSchemaOid = schemaOid(domain);
         long objectRelationOid = objectOid(object);
-        if (!matchesPattern(domain, schemaPattern)
+        if (!policy.canReadObject(principal, catalog.model(), object)
+            || !matchesPattern(domain, schemaPattern)
             || !matchesPattern(object.metadata().name(), relationPattern)
             || (schemaOid != null && schemaOid != objectSchemaOid)
             || (relationOid != null && relationOid != objectRelationOid)) continue;
@@ -504,7 +601,8 @@ public class PgQueryService {
             position++;
           }
           for (var metric : catalog.model().metrics().values()) {
-            if (!belongsTo(metric, object)) continue;
+            if (!belongsTo(metric, object)
+                || !policy.canReadMetric(principal, catalog.model(), metric)) continue;
             if (matchesPattern(metric.metadata().name(), attributePattern))
               source.add(
                   catalogProjectionRow(
@@ -532,7 +630,7 @@ public class PgQueryService {
         }
       }
     } else {
-      for (String domain : catalog.model().domains()) {
+      for (String domain : readableDomains(principal)) {
         if (!matchesPattern(domain, schemaPattern)) continue;
         Map<String, Object> row = new HashMap<>();
         putCatalogValue(row, "n", "oid", schemaOid(domain));
@@ -612,7 +710,8 @@ public class PgQueryService {
     return "varchar";
   }
 
-  private QueryResult catalogTables(String sql, List<Object> parameters) {
+  private QueryResult catalogTables(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols(
             col("oid", Types.BIGINT, "bigint"),
@@ -640,6 +739,7 @@ public class PgQueryService {
     }
     List<List<Object>> rows = new ArrayList<>();
     for (var o : catalog.model().objects().values()) {
+      if (!policy.canReadObject(principal, catalog.model(), o)) continue;
       long schemaOid = schemaOid(catalog.model().domain(o));
       if ((selectedSchema == null || selectedSchema == schemaOid)
           && (selectedObject == null || selectedObject.equals(o.metadata().name()))) {
@@ -662,7 +762,8 @@ public class PgQueryService {
     return result(c, rows);
   }
 
-  private QueryResult catalogAttributes(String sql, List<Object> parameters) {
+  private QueryResult catalogAttributes(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols(
             col("relname", Types.VARCHAR, "varchar"),
@@ -691,6 +792,7 @@ public class PgQueryService {
     }
     List<List<Object>> rows = new ArrayList<>();
     for (var o : catalog.model().objects().values()) {
+      if (!policy.canReadObject(principal, catalog.model(), o)) continue;
       if (selectedSchema != null && selectedSchema != schemaOid(catalog.model().domain(o)))
         continue;
       if (selectedObject != null && selectedObject != objectOid(o)) continue;
@@ -700,7 +802,7 @@ public class PgQueryService {
             attributeRow(
                 o, d.name(), pos++, Boolean.FALSE.equals(d.nullable()), d.type(), d.description()));
       for (var m : catalog.model().metrics().values())
-        if (belongsTo(m, o))
+        if (belongsTo(m, o) && policy.canReadMetric(principal, catalog.model(), m))
           rows.add(
               attributeRow(
                   o,
@@ -799,10 +901,6 @@ public class PgQueryService {
     return first != null ? first : second;
   }
 
-  private String defaultSchema() {
-    return catalog.model().domains().iterator().next();
-  }
-
   private String currentSetting(String normalized, SessionSettings session) {
     var matcher =
         Pattern.compile("current_setting\\s*\\(\\s*'([^']+)'", Pattern.CASE_INSENSITIVE)
@@ -818,7 +916,7 @@ public class PgQueryService {
       case "transaction_isolation" -> "read committed";
       case "search_path" ->
           session == null
-              ? String.join(",", catalog.model().domains())
+              ? String.join(",", readableDomains(principal(session)))
               : session.searchPath();
       default -> "";
     };
@@ -834,7 +932,8 @@ public class PgQueryService {
     return 1043;
   }
 
-  private QueryResult columns(String sql, List<Object> parameters) {
+  private QueryResult columns(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols(
             "TABLE_CAT",
@@ -867,7 +966,8 @@ public class PgQueryService {
     String columnPattern = predicatePattern(sql, "a.attname", parameters);
     for (var o : catalog.model().objects().values()) {
       String domain = catalog.model().domain(o);
-      if (!matchesPattern(domain, schemaPattern)
+      if (!policy.canReadObject(principal, catalog.model(), o)
+          || !matchesPattern(domain, schemaPattern)
           || !matchesPattern(o.metadata().name(), tablePattern)) continue;
       int pos = 1;
       for (var d : o.spec().dimensions())
@@ -899,7 +999,9 @@ public class PgQueryService {
                 "NO",
                 "NO"));
       for (var m : catalog.model().metrics().values())
-        if (belongsTo(m, o) && matchesPattern(m.metadata().name(), columnPattern))
+        if (belongsTo(m, o)
+            && policy.canReadMetric(principal, catalog.model(), m)
+            && matchesPattern(m.metadata().name(), columnPattern))
           rows.add(
               row(
                   "semantic",
@@ -937,7 +1039,8 @@ public class PgQueryService {
         && normalized.contains("a.attlen");
   }
 
-  private QueryResult pgJdbcColumns(String sql, List<Object> parameters) {
+  private QueryResult pgJdbcColumns(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> columns =
         cols(
             col("nspname", Types.VARCHAR, "varchar"),
@@ -961,7 +1064,8 @@ public class PgQueryService {
     List<List<Object>> rows = new ArrayList<>();
     for (var object : catalog.model().objects().values()) {
       String domain = catalog.model().domain(object);
-      if (!matchesPattern(domain, schemaPattern)
+      if (!policy.canReadObject(principal, catalog.model(), object)
+          || !matchesPattern(domain, schemaPattern)
           || !matchesPattern(object.metadata().name(), tablePattern)) continue;
       long position = 1;
       for (var dimension : object.spec().dimensions()) {
@@ -979,7 +1083,8 @@ public class PgQueryService {
         position++;
       }
       for (var metric : catalog.model().metrics().values()) {
-        if (!belongsTo(metric, object)) continue;
+        if (!belongsTo(metric, object)
+            || !policy.canReadMetric(principal, catalog.model(), metric)) continue;
         if (matchesPattern(metric.metadata().name(), columnPattern))
           rows.add(
               pgJdbcColumnRow(
@@ -1075,7 +1180,7 @@ public class PgQueryService {
     return value.matches(regex.append('$').toString());
   }
 
-  private QueryResult primaryKeys(String sql) {
+  private QueryResult primaryKeys(String sql, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols("TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "KEY_SEQ", "PK_NAME");
     List<List<Object>> rows = new ArrayList<>();
@@ -1084,6 +1189,7 @@ public class PgQueryService {
     String selectedObject = equalityLiteral(sql, "ct.relname");
     for (var o : model.objects().values()) {
       String domain = model.domain(o);
+      if (!policy.canReadObject(principal, model, o)) continue;
       if (selectedDomain != null && !selectedDomain.equals(domain)) continue;
       if (selectedObject != null && !selectedObject.equals(o.metadata().name())) continue;
       short i = 1;
@@ -1100,7 +1206,8 @@ public class PgQueryService {
     return result(c, rows);
   }
 
-  private QueryResult bestRowIdentifier(String sql, List<Object> parameters) {
+  private QueryResult bestRowIdentifier(
+      String sql, List<Object> parameters, SemanticPrincipal principal) {
     List<QueryResult.Column> columns =
         cols(
             col("attname", Types.VARCHAR, "varchar"),
@@ -1111,7 +1218,8 @@ public class PgQueryService {
     List<List<Object>> rows = new ArrayList<>();
     for (var object : catalog.model().objects().values()) {
       String domain = catalog.model().domain(object);
-      if (!matchesPattern(domain, schemaPattern)
+      if (!policy.canReadObject(principal, catalog.model(), object)
+          || !matchesPattern(domain, schemaPattern)
           || !matchesPattern(object.metadata().name(), tablePattern)) continue;
       for (String key : object.spec().primaryKey()) {
         var dimension =
@@ -1126,7 +1234,7 @@ public class PgQueryService {
     return result(columns, rows);
   }
 
-  private QueryResult foreignKeys(String sql) {
+  private QueryResult foreignKeys(String sql, SemanticPrincipal principal) {
     List<QueryResult.Column> c =
         cols(
             "PKTABLE_CAT",
@@ -1150,6 +1258,7 @@ public class PgQueryService {
     String foreignObject = equalityLiteral(sql, "fkc.relname");
 
     for (var key : foreignKeyProjector.project(catalog.model())) {
+      if (!readableKey(principal, key)) continue;
       if (primaryDomain != null && !primaryDomain.equals(key.primaryKeyDomain())) continue;
       if (primaryObject != null && !primaryObject.equals(key.primaryKeyObject())) continue;
       if (foreignDomain != null && !foreignDomain.equals(key.foreignKeyDomain())) continue;
@@ -1175,7 +1284,7 @@ public class PgQueryService {
     return result(c, rows);
   }
 
-  private QueryResult tableConstraints() {
+  private QueryResult tableConstraints(SemanticPrincipal principal) {
     List<QueryResult.Column> columns =
         cols(
             "constraint_catalog",
@@ -1191,7 +1300,8 @@ public class PgQueryService {
     List<List<Object>> rows = new ArrayList<>();
     SemanticModel model = catalog.model();
     for (var object : model.objects().values())
-      if (!object.spec().primaryKey().isEmpty())
+      if (policy.canReadObject(principal, model, object)
+          && !object.spec().primaryKey().isEmpty())
         rows.add(
             row(
                 "semantic",
@@ -1204,7 +1314,8 @@ public class PgQueryService {
                 "NO",
                 "NO",
                 "NO"));
-    for (var key : foreignKeyProjector.project(model))
+    for (var key : foreignKeyProjector.project(model)) {
+      if (!readableKey(principal, key)) continue;
       rows.add(
           row(
               "semantic",
@@ -1217,10 +1328,11 @@ public class PgQueryService {
               "NO",
               "NO",
               key.enforced() ? "YES" : "NO"));
+    }
     return result(columns, rows);
   }
 
-  private QueryResult keyColumnUsage() {
+  private QueryResult keyColumnUsage(SemanticPrincipal principal) {
     List<QueryResult.Column> columns =
         cols(
             "constraint_catalog",
@@ -1234,7 +1346,8 @@ public class PgQueryService {
             "position_in_unique_constraint");
     List<List<Object>> rows = new ArrayList<>();
     SemanticModel model = catalog.model();
-    for (var object : model.objects().values())
+    for (var object : model.objects().values()) {
+      if (!policy.canReadObject(principal, model, object)) continue;
       for (int i = 0; i < object.spec().primaryKey().size(); i++)
         rows.add(
             row(
@@ -1247,7 +1360,9 @@ public class PgQueryService {
                 object.spec().primaryKey().get(i),
                 i + 1,
                 null));
-    for (var key : foreignKeyProjector.project(model))
+    }
+    for (var key : foreignKeyProjector.project(model)) {
+      if (!readableKey(principal, key)) continue;
       for (int i = 0; i < key.foreignKeyFields().size(); i++)
         rows.add(
             row(
@@ -1260,10 +1375,11 @@ public class PgQueryService {
                 key.foreignKeyFields().get(i),
                 i + 1,
                 i + 1));
+    }
     return result(columns, rows);
   }
 
-  private QueryResult referentialConstraints() {
+  private QueryResult referentialConstraints(SemanticPrincipal principal) {
     List<QueryResult.Column> columns =
         cols(
             "constraint_catalog",
@@ -1276,7 +1392,8 @@ public class PgQueryService {
             "update_rule",
             "delete_rule");
     List<List<Object>> rows = new ArrayList<>();
-    for (var key : foreignKeyProjector.project(catalog.model()))
+    for (var key : foreignKeyProjector.project(catalog.model())) {
+      if (!readableKey(principal, key)) continue;
       rows.add(
           row(
               "semantic",
@@ -1288,7 +1405,24 @@ public class PgQueryService {
               "NONE",
               "NO ACTION",
               "NO ACTION"));
+    }
     return result(columns, rows);
+  }
+
+  private boolean readableKey(
+      SemanticPrincipal principal, SemanticForeignKeyProjector.VirtualForeignKey key) {
+    return policy.canReadDomain(principal, key.primaryKeyDomain())
+        && policy.canReadDomain(principal, key.foreignKeyDomain());
+  }
+
+  private List<String> readableDomains(SemanticPrincipal principal) {
+    return catalog.model().domains().stream()
+        .filter(domain -> policy.canReadDomain(principal, domain))
+        .toList();
+  }
+
+  private SemanticPrincipal principal(SessionSettings session) {
+    return session == null ? SemanticPrincipal.anonymous() : session.principal();
   }
 
   private String equalityLiteral(String sql, String expression) {
@@ -1458,9 +1592,13 @@ public class PgQueryService {
   }
 
   public record SessionSettings(
-      String currentSchema, String searchPath, Map<String, String> settings) {
+      String currentSchema,
+      String searchPath,
+      Map<String, String> settings,
+      SemanticPrincipal principal) {
     public SessionSettings {
       settings = Map.copyOf(settings);
+      principal = principal == null ? SemanticPrincipal.anonymous() : principal;
     }
   }
 }

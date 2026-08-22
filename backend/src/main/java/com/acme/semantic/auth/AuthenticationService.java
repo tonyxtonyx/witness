@@ -58,6 +58,21 @@ public class AuthenticationService {
     return tokens(user, newRefreshToken(user.id()));
   }
 
+  public Optional<SemanticPrincipal> authenticatePassword(String username, String password) {
+    String suppliedUsername = username == null ? "" : username;
+    String suppliedPassword = password == null ? "" : password;
+    IdentityRepository.UserRecord user =
+        identities.findUserByUsername(suppliedUsername).orElse(null);
+    String hash = user == null || user.passwordHash() == null ? dummyPasswordHash : user.passwordHash();
+    boolean matches = passwords.matches(suppliedPassword, hash);
+    if (user == null
+        || !matches
+        || !user.enabled()
+        || !"local".equals(user.provider())
+        || user.passwordHash() == null) return Optional.empty();
+    return identities.resolveUser(user.id());
+  }
+
   public Optional<SemanticPrincipal> authenticateAccessToken(String token) {
     try {
       return identities.resolveUser(jwt.verifyAccessToken(token));
@@ -73,6 +88,22 @@ public class AuthenticationService {
         .findEnabledServiceAccountByHash(hash)
         .filter(account -> apiKeys.matches(hash, account.apiKeyHash()))
         .map(identities::resolveServiceAccount);
+  }
+
+  public Optional<SemanticPrincipal> refreshPrincipal(SemanticPrincipal principal) {
+    if (principal == null || !principal.authenticated()) return Optional.empty();
+    try {
+      if (principal.serviceAccount() && principal.id().startsWith("service-account:"))
+        return identities
+            .findEnabledServiceAccountById(
+                Long.parseLong(principal.id().substring("service-account:".length())))
+            .map(identities::resolveServiceAccount);
+      if (!principal.serviceAccount() && principal.id().startsWith("user:"))
+        return identities.resolveUser(Long.parseLong(principal.id().substring("user:".length())));
+    } catch (NumberFormatException ignored) {
+      return Optional.empty();
+    }
+    return Optional.empty();
   }
 
   @Transactional

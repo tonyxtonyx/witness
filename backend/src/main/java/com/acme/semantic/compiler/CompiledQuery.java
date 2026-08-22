@@ -15,6 +15,8 @@ public record CompiledQuery(
   }
 
   public CompiledQuery {
+    parameters = List.copyOf(parameters);
+    columns = List.copyOf(columns);
     domains = domains == null ? Set.of() : Set.copyOf(domains);
   }
 

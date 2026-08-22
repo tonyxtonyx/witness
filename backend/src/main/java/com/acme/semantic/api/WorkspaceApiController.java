@@ -1,5 +1,9 @@
 package com.acme.semantic.api;
 
+import com.acme.semantic.cache.SemanticAuthorizationFingerprints;
+import com.acme.semantic.cache.CacheKind;
+import com.acme.semantic.cache.ReadableModelCache;
+import com.acme.semantic.cache.SemanticCacheManager;
 import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.compiler.*;
 import com.acme.semantic.config.SemanticProperties;
@@ -32,6 +36,52 @@ public class WorkspaceApiController {
   private final SemanticAccessPolicy policy;
   private final SemanticResourceAccess access;
   private final SemanticSqlReferenceAuthorizer sqlReferences;
+  private final SemanticCacheManager cache;
+  private final ReadableModelCache readableModels;
+
+  public WorkspaceApiController(
+      SemanticCatalog catalog,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      ChangeService changes,
+      SemanticProperties properties,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access,
+      SemanticSqlReferenceAuthorizer sqlReferences) {
+    this(
+        catalog,
+        compiler,
+        executor,
+        changes,
+        properties,
+        policy,
+        access,
+        sqlReferences,
+        SemanticCacheManager.disabled());
+  }
+
+  public WorkspaceApiController(
+      SemanticCatalog catalog,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      ChangeService changes,
+      SemanticProperties properties,
+      SemanticAccessPolicy policy,
+      SemanticResourceAccess access,
+      SemanticSqlReferenceAuthorizer sqlReferences,
+      SemanticCacheManager cache) {
+    this(
+        catalog,
+        compiler,
+        executor,
+        changes,
+        properties,
+        policy,
+        access,
+        sqlReferences,
+        cache,
+        new ReadableModelCache(256));
+  }
 
   @Autowired
   public WorkspaceApiController(
@@ -42,7 +92,9 @@ public class WorkspaceApiController {
       SemanticProperties properties,
       SemanticAccessPolicy policy,
       SemanticResourceAccess access,
-      SemanticSqlReferenceAuthorizer sqlReferences) {
+      SemanticSqlReferenceAuthorizer sqlReferences,
+      SemanticCacheManager cache,
+      ReadableModelCache readableModels) {
     this.catalog = catalog;
     this.compiler = compiler;
     this.executor = executor;
@@ -51,6 +103,8 @@ public class WorkspaceApiController {
     this.policy = policy;
     this.access = access;
     this.sqlReferences = sqlReferences;
+    this.cache = cache;
+    this.readableModels = readableModels;
   }
 
   public WorkspaceApiController(
@@ -148,8 +202,21 @@ public class WorkspaceApiController {
     long started = System.nanoTime();
     try {
       SemanticPrincipal principal = ApiSecurityFilter.principal(httpRequest);
-      sqlReferences.requireReadableReferences(principal, request.sql(), catalog.model());
-      CompiledQuery compiled = compiler.compile(request.sql(), catalog.model());
+      SemanticModel model = catalog.model();
+      sqlReferences.requireReadableReferences(principal, request.sql(), model);
+      boolean planCache = cache.enabled(CacheKind.PLAN);
+      boolean resultCache = cache.enabled(CacheKind.RESULT);
+      String authorization = SemanticCacheManager.emptyAuthorizationFingerprint();
+      if (planCache || resultCache) {
+        ReadableModelCache.View readable = readableModels.resolve(model, principal, policy);
+        authorization =
+            SemanticAuthorizationFingerprints.forRawSql(
+                policy, principal, model, readable.fingerprint());
+      }
+      CompiledQuery compiled =
+          planCache
+              ? cache.compile(request.sql(), model, authorization, compiler)
+              : compiler.compile(request.sql(), model);
       try {
         policy.requireQueryDomains(principal, compiled.domains());
       } catch (SemanticException exception) {
@@ -167,7 +234,11 @@ public class WorkspaceApiController {
                         + " query parameters but received "
                         + request.parameters().size(),
                     "Provide one value for every ? placeholder."));
-      QueryResult result = executor.execute(compiled, request.parameters());
+      QueryResult result =
+          resultCache
+              ? cache.execute(
+                  model.revision(), compiled, request.parameters(), authorization, executor)
+              : cache.executeUncached(compiled, request.parameters(), executor);
       long elapsed = (System.nanoTime() - started) / 1_000_000;
       return ResponseEntity.ok(
           new QueryResponse(
@@ -176,7 +247,9 @@ public class WorkspaceApiController {
               result.rows().size(),
               elapsed,
               canViewCompiledSql(httpRequest) ? compiled.trinoSql() : null,
-              result.queryId()));
+              result.queryId(),
+              result.cacheHit(),
+              result.correlationId()));
     } catch (SqlCompilationException e) {
       String hint =
           e.getMessage().contains("belongs to domain schema")
@@ -403,7 +476,9 @@ public class WorkspaceApiController {
       int rowCount,
       long elapsedMs,
       String compiledTrinoSql,
-      String queryId) {}
+      String queryId,
+      boolean cacheHit,
+      String correlationId) {}
 
   public record QueryError(String code, String message, String hint) {}
 

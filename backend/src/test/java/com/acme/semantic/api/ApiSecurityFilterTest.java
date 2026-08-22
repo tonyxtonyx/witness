@@ -48,4 +48,23 @@ class ApiSecurityFilterTest {
 
     assertThat(response.getHeader("X-Correlation-ID")).isEqualTo("trace.valid:123-abc");
   }
+
+  @Test
+  void actuatorMetricsRequireAuthenticationButHealthProbesRemainPublic() throws Exception {
+    MockHttpServletResponse metrics = filter("/actuator/prometheus");
+    MockHttpServletResponse discovery = filter("/actuator");
+    MockHttpServletResponse healthComponent = filter("/actuator/health/db");
+    MockHttpServletResponse health = filter("/actuator/health/readiness");
+
+    assertThat(metrics.getStatus()).isEqualTo(401);
+    assertThat(discovery.getStatus()).isEqualTo(401);
+    assertThat(healthComponent.getStatus()).isEqualTo(401);
+    assertThat(health.getStatus()).isEqualTo(200);
+  }
+
+  private MockHttpServletResponse filter(String path) throws Exception {
+    MockHttpServletResponse response = new MockHttpServletResponse();
+    filter.doFilter(new MockHttpServletRequest("GET", path), response, new MockFilterChain());
+    return response;
+  }
 }

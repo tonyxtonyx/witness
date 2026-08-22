@@ -11,25 +11,35 @@ public record SemanticProperties(
     Pgwire pgwire,
     Trino trino,
     Gitlab gitlab,
-    Mcp mcp) {
+    Mcp mcp,
+    Cache cache) {
   @ConstructorBinding
   public SemanticProperties {}
 
   public SemanticProperties(
       String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab) {
-    this(modelPath, apiKey, false, pgwire, trino, gitlab, null);
+    this(modelPath, apiKey, false, pgwire, trino, gitlab, null, null);
   }
 
   public SemanticProperties(
       String modelPath, String apiKey, Pgwire pgwire, Trino trino, Gitlab gitlab, Mcp mcp) {
-    this(modelPath, apiKey, false, pgwire, trino, gitlab, mcp);
+    this(modelPath, apiKey, false, pgwire, trino, gitlab, mcp, null);
+  }
+
+  public SemanticProperties(
+      String modelPath,
+      String apiKey,
+      boolean allowInsecureApiKey,
+      Pgwire pgwire,
+      Trino trino,
+      Gitlab gitlab,
+      Mcp mcp) {
+    this(modelPath, apiKey, allowInsecureApiKey, pgwire, trino, gitlab, mcp, null);
   }
 
   public record Pgwire(
       boolean enabled,
       int port,
-      String username,
-      String password,
       int maxFrameBytes,
       int maxPreparedStatements) {}
 
@@ -69,4 +79,26 @@ public record SemanticProperties(
       return new Mcp(true, "/api/mcp", 50, 100, 500, 20, 100, 5, 250, false, false);
     }
   }
+
+  public record Cache(
+      boolean enabled,
+      int maxEntries,
+      long maxBytes,
+      Layer plans,
+      Layer dimensionValues,
+      ResultLayer results) {
+    public static Cache defaults() {
+      return new Cache(
+          true,
+          1_000,
+          64L * 1024 * 1024,
+          new Layer(600),
+          new Layer(300),
+          new ResultLayer(30, 1_000, 1024L * 1024));
+    }
+  }
+
+  public record Layer(long ttlSeconds) {}
+
+  public record ResultLayer(long ttlSeconds, int maxRows, long maxBytes) {}
 }

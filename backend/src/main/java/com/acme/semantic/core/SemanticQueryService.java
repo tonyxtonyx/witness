@@ -1,5 +1,9 @@
 package com.acme.semantic.core;
 
+import com.acme.semantic.cache.CacheKind;
+import com.acme.semantic.cache.SemanticCacheKey;
+import com.acme.semantic.cache.SemanticCacheManager;
+import com.acme.semantic.cache.SemanticCacheValues;
 import com.acme.semantic.catalog.SemanticCatalog;
 import com.acme.semantic.compiler.CompiledQuery;
 import com.acme.semantic.compiler.SemanticSqlCompiler;
@@ -29,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -37,6 +42,7 @@ public class SemanticQueryService {
   private final SemanticAccessPolicy policy;
   private final SemanticSqlCompiler compiler;
   private final QueryExecutor executor;
+  private final SemanticCacheManager cache;
   private final SemanticProperties.Mcp config;
   private final int engineMaxRows;
 
@@ -46,10 +52,22 @@ public class SemanticQueryService {
       SemanticSqlCompiler compiler,
       QueryExecutor executor,
       SemanticProperties properties) {
+    this(catalog, policy, compiler, executor, properties, SemanticCacheManager.disabled());
+  }
+
+  @Autowired
+  public SemanticQueryService(
+      SemanticCatalog catalog,
+      SemanticAccessPolicy policy,
+      SemanticSqlCompiler compiler,
+      QueryExecutor executor,
+      SemanticProperties properties,
+      SemanticCacheManager cache) {
     this.catalog = catalog;
     this.policy = policy;
     this.compiler = compiler;
     this.executor = executor;
+    this.cache = cache;
     this.config = properties.mcp() == null ? SemanticProperties.Mcp.defaults() : properties.mcp();
     this.engineMaxRows =
         properties.trino() == null ? 10_000 : Math.max(1, properties.trino().maxRows());
@@ -101,7 +119,8 @@ public class SemanticQueryService {
         Map.of(),
         planned.warnings(),
         policy.appliedPolicySummary(principal),
-        new Execution(durationMs, result.queryId()),
+        new Execution(
+            durationMs, result.queryId(), result.cacheHit(), result.correlationId()),
         traceId);
   }
 
@@ -160,8 +179,34 @@ public class SemanticQueryService {
             semanticQuery,
             new PlanOptions(false, true, offset, search, request.dimensionId()));
     long started = System.nanoTime();
+    SemanticCacheKey dimensionCacheKey = null;
+    if (cache.enabled(CacheKind.DIMENSION_VALUES)) {
+      dimensionCacheKey =
+          cache.key(
+              CacheKind.DIMENSION_VALUES,
+              model.revision(),
+              planned.compiled().trinoSql(),
+              planned.parameters(),
+              planned.authorizationFingerprint(),
+              dimensionRequestFingerprint(request, offset));
+      DimensionValuesData cached =
+          cache.get(dimensionCacheKey, DimensionValuesData.class).orElse(null);
+      if (cached != null) {
+        return new DimensionValuesResponse(
+            cached.dimension(),
+            cached.values(),
+            cached.nextCursor(),
+            cached.truncated(),
+            cached.semanticRevision(),
+            new Execution(
+                (System.nanoTime() - started) / 1_000_000,
+                null,
+                true,
+                planned.compiled().correlationId()),
+            traceId);
+      }
+    }
     QueryResult result = execute(planned);
-    long durationMs = (System.nanoTime() - started) / 1_000_000;
     boolean truncated = result.rows().size() > limit;
     List<List<Object>> rows =
         truncated ? result.rows().subList(0, limit) : result.rows();
@@ -171,15 +216,25 @@ public class SemanticQueryService {
             .map(row -> new DimensionValue(row.getFirst(), Objects.toString(row.getFirst(), null)))
             .toList();
     String next = truncated ? encodeCursor(model.revision(), offset + values.size()) : null;
+    DimensionValuesData data =
+        new DimensionValuesData(
+            new DimensionDescriptor(request.dimensionId(), requestedDimension.dimension().type()),
+            values,
+            next,
+            truncated,
+            model.revision());
+    if (dimensionCacheKey != null) cache.put(dimensionCacheKey, data);
     return new DimensionValuesResponse(
-        new DimensionDescriptor(request.dimensionId(), requestedDimension.dimension().type()),
-        values,
-        next,
-        truncated,
-        model.revision(),
+        data.dimension(),
+        data.values(),
+        data.nextCursor(),
+        data.truncated(),
+        data.semanticRevision(),
         new Execution(
             (System.nanoTime() - started) / 1_000_000,
-            result.queryId()),
+            result.queryId(),
+            result.cacheHit(),
+            result.correlationId()),
         traceId);
   }
 
@@ -204,6 +259,15 @@ public class SemanticQueryService {
             true);
     List<ResolvedFilter> allFilters = new ArrayList<>(filters);
     allFilters.addAll(policyFilters);
+    boolean cacheKeysRequired =
+        cache.enabled(CacheKind.PLAN)
+            || cache.enabled(CacheKind.RESULT)
+            || (options.dimensionValueMember() != null
+                && cache.enabled(CacheKind.DIMENSION_VALUES));
+    String authorizationFingerprint =
+        cacheKeysRequired
+            ? policyFingerprint(model, policyFilters)
+            : SemanticCacheManager.emptyAuthorizationFingerprint();
     int requestedLimit = normalizeLimit(query.limit());
     String timezone = normalizeTimezone(query.timezone());
     SemanticModel.SemanticObject base =
@@ -267,7 +331,10 @@ public class SemanticQueryService {
             requestedLimit);
     CompiledQuery compiled;
     try {
-      compiled = compiler.compile(semanticSql, model);
+      compiled =
+          cache.enabled(CacheKind.PLAN)
+              ? cache.compile(semanticSql, model, authorizationFingerprint, compiler)
+              : compiler.compile(semanticSql, model);
     } catch (SqlCompilationException exception) {
       SemanticErrorCode code =
           exception.sqlState().equals("42809") || exception.sqlState().equals("0A000")
@@ -327,7 +394,8 @@ public class SemanticQueryService {
         dimensions,
         joinResolution.joins(),
         List.copyOf(output),
-        List.copyOf(warnings));
+        List.copyOf(warnings),
+        authorizationFingerprint);
   }
 
   private List<ResolvedMetric> resolveMetrics(
@@ -821,7 +889,14 @@ public class SemanticQueryService {
 
   private QueryResult execute(PlannedQuery planned) {
     try {
-      return executor.execute(planned.compiled(), planned.parameters());
+      return cache.enabled(CacheKind.RESULT)
+          ? cache.execute(
+              planned.model().revision(),
+              planned.compiled(),
+              planned.parameters(),
+              planned.authorizationFingerprint(),
+              executor)
+          : cache.executeUncached(planned.compiled(), planned.parameters(), executor);
     } catch (QueryExecutionException exception) {
       boolean timeout = "57014".equals(exception.sqlState());
       throw new SemanticException(
@@ -831,6 +906,35 @@ public class SemanticQueryService {
           Map.of("sqlState", exception.sqlState()),
           List.of("Retry later or reduce query dimensions and filters"));
     }
+  }
+
+  private String policyFingerprint(
+      SemanticModel model, List<ResolvedFilter> policyFilters) {
+    List<String> predicates = new ArrayList<>();
+    List<Object> values = new ArrayList<>();
+    for (ResolvedFilter filter : policyFilters) {
+      predicates.add(renderFilter(model, filter, values));
+    }
+    return SemanticCacheValues.authorizationFingerprint(predicates, values);
+  }
+
+  private String dimensionRequestFingerprint(DimensionValuesRequest request, int offset) {
+    List<Object> conditions = new ArrayList<>();
+    if (request.filters() != null) {
+      conditions.add(request.filters().operator());
+      request.filters().conditions().forEach(
+          condition ->
+              conditions.add(
+                  List.of(condition.member(), condition.operator(), condition.values())));
+    }
+    return SemanticCacheValues.fingerprint(
+        List.of(
+            request.dimensionId(),
+            request.metricIds() == null ? List.of() : request.metricIds(),
+            request.search() == null ? "" : request.search().trim(),
+            conditions,
+            request.limit(),
+            offset));
   }
 
   private CompilationResponse compilationResponse(
@@ -1148,7 +1252,19 @@ public class SemanticQueryService {
       List<ResolvedDimension> dimensions,
       List<JoinStep> joins,
       List<PlannedColumn> outputColumns,
-      List<String> warnings) {}
+      List<String> warnings,
+      String authorizationFingerprint) {}
+
+  private record DimensionValuesData(
+      DimensionDescriptor dimension,
+      List<DimensionValue> values,
+      String nextCursor,
+      boolean truncated,
+      String semanticRevision) {
+    private DimensionValuesData {
+      values = List.copyOf(values);
+    }
+  }
 
   public record ValidationIssue(
       String code,
@@ -1180,7 +1296,8 @@ public class SemanticQueryService {
   public record ResultColumn(
       String name, String type, String role, String unit, boolean nullable) {}
 
-  public record Execution(long durationMs, String engineQueryId) {}
+  public record Execution(
+      long durationMs, String engineQueryId, boolean cacheHit, String correlationId) {}
 
   public record MetricQueryResponse(
       String queryId,

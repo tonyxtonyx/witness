@@ -24,8 +24,6 @@ semantic:
   pgwire:
     enabled: ${PGWIRE_ENABLED:true}
     port: ${PGWIRE_PORT:5433}
-    username: ${PGWIRE_USERNAME:semantic}
-    password: ${PGWIRE_PASSWORD:semantic}
     max-frame-bytes: ${PGWIRE_MAX_FRAME_BYTES:1048576}
     max-prepared-statements: ${PGWIRE_MAX_PREPARED_STATEMENTS:256}
   trino:
@@ -58,3 +56,15 @@ semantic:
     lineage-max-nodes: ${MCP_LINEAGE_MAX_NODES:250}
     expose-compiled-sql: ${MCP_EXPOSE_COMPILED_SQL:false}
     expose-physical-lineage: ${MCP_EXPOSE_PHYSICAL_LINEAGE:false}
+  cache:
+    enabled: ${SEMANTIC_CACHE_ENABLED:true}
+    max-entries: ${SEMANTIC_CACHE_MAX_ENTRIES:1000}
+    max-bytes: ${SEMANTIC_CACHE_MAX_BYTES:67108864}
+    plans:
+      ttl-seconds: ${SEMANTIC_PLAN_CACHE_TTL_SECONDS:600}
+    dimension-values:
+      ttl-seconds: ${SEMANTIC_DIMENSION_CACHE_TTL_SECONDS:300}
+    results:
+      ttl-seconds: ${SEMANTIC_RESULT_CACHE_TTL_SECONDS:30}
+      max-rows: ${SEMANTIC_RESULT_CACHE_MAX_ROWS:1000}
+      max-bytes: ${SEMANTIC_RESULT_CACHE_MAX_BYTES:1048576}

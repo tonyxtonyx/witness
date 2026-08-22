@@ -82,6 +82,11 @@ public class DefaultSemanticAccessPolicy implements SemanticAccessPolicy {
   }
 
   @Override
+  public String readableModelScope(SemanticPrincipal principal) {
+    return "effective-domain-grants";
+  }
+
+  @Override
   public List<String> appliedPolicySummary(SemanticPrincipal principal) {
     if (principal == null || !principal.authenticated()) return List.of("Unauthenticated");
     if (principal.admin()) return List.of("Administrator: all domains, permissions, and capabilities");

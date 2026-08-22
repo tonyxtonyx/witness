@@ -60,7 +60,7 @@ public final class SemanticIds {
     return requireDimension(model, policy, principal, id, true);
   }
 
-  static ResolvedDimension requirePolicyDimension(
+  public static ResolvedDimension requirePolicyDimension(
       SemanticModel model,
       SemanticAccessPolicy policy,
       SemanticPrincipal principal,

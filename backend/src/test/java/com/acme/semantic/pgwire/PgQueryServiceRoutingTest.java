@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.Test;
 
 class PgQueryServiceRoutingTest {
-  private final PgQueryService service = new PgQueryService(null, null, null);
+  private final PgQueryService service = new PgQueryService(null, null, null, null, null);
 
   @Test
   void routesCatalogTablesUsingParsedTableReferences() {

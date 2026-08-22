@@ -87,6 +87,14 @@ public interface SemanticAccessPolicy {
     return List.of();
   }
 
+  /**
+   * Additional scope for readable-model memoization. Custom policies are isolated by principal
+   * unless they explicitly declare that effective grants fully determine visibility.
+   */
+  default String readableModelScope(SemanticPrincipal principal) {
+    return principal == null ? "anonymous" : principal.id();
+  }
+
   default List<String> appliedPolicySummary(SemanticPrincipal principal) {
     return List.of("No resolved semantic grants");
   }

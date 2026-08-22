@@ -98,6 +98,10 @@ class McpQueryIntegrationTest {
         .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
         .containsEntry("queryId", "fake-trino-query")
         .containsEntry("traceId", "trace-fake-trino");
+    Map<?, ?> structured = (Map<?, ?>) result.structuredContent();
+    Map<?, ?> execution = (Map<?, ?>) structured.get("execution");
+    assertThat(execution.get("cacheHit")).isEqualTo(false);
+    assertThat(execution.get("correlationId")).isInstanceOf(String.class).asString().isNotBlank();
     assertThat(auditEvents.list)
         .extracting(ILoggingEvent::getFormattedMessage)
         .allSatisfy(
